@@ -60,7 +60,7 @@ export function createPlayerHTML(opts = {}) {
         </div>
 
         <!-- Time -->
-        <div class="time-display" id="timeDisplay"${hide(o.showTime)}>
+        <div class="time-display" id="timeDisplay" role="status" aria-live="polite"${hide(o.showTime)}>
             <span id="currentTime">00:00.0</span><span class="time-sep">/</span><span id="totalTime">00:00.0</span>
         </div>
 
@@ -170,7 +170,14 @@ export function createPlayerHTML(opts = {}) {
                     <div class="frequency-labels" id="freqLabels"></div>
                 </div>
                 <div class="time-pane">
-                    <div class="canvas-wrapper" id="canvasWrapper">
+                    <div class="canvas-wrapper" id="canvasWrapper"
+                         role="slider"
+                         aria-label="Playback position"
+                         aria-valuemin="0"
+                         aria-valuemax="0"
+                         aria-valuenow="0"
+                         aria-valuetext="00:00.0 of 00:00.0"
+                         tabindex="0">
                         <canvas id="spectrogramCanvas"></canvas>
                         <div class="playhead" id="playhead"></div>
                     </div>

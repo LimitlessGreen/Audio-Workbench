@@ -7,11 +7,14 @@ import {
     DEFAULT_WAVEFORM_HEIGHT, DEFAULT_SPECTROGRAM_DISPLAY_HEIGHT,
     MIN_WAVEFORM_HEIGHT, MIN_SPECTROGRAM_DISPLAY_HEIGHT,
     SEEK_FINE_SEC, SEEK_COARSE_SEC, MIN_WINDOW_NORM,
+    PROGRESSIVE_CHUNK_SECONDS, PROGRESSIVE_MIN_DURATION_SEC,
     PERCH_FRAME_RATE, PERCH_N_MELS,
     PERCH_PCEN_GAIN, PERCH_PCEN_BIAS, PERCH_PCEN_ROOT, PERCH_PCEN_SMOOTHING,
 } from './constants.js';
 
 import { formatTime, formatSecondsShort, isTypingContext } from './utils.js';
+import { GestureRecognizer } from './gestures.js';
+import { TRANSPORT_STATE_LABELS, canTransitionTransportState } from './transportState.js';
 
 import {
     computeAmplitudePeak,
@@ -23,6 +26,10 @@ import {
     GpuColorizer,
     renderSpectrogram,
     createSpectrogramProcessor,
+    sha256ArrayBuffer,
+    buildSpectrogramCacheKey,
+    getSpectrogramCacheEntry,
+    putSpectrogramCacheEntry,
 } from './spectrogram.js';
 
 import {
@@ -47,13 +54,15 @@ async function decodeArrayBuffer(arrayBuffer) {
 // ═════════════════════════════════════════════════════════════════════
 
 export class PlayerState {
-    constructor(container, WaveSurfer) {
+    constructor(container, WaveSurfer, emitHostEvent = null, options = {}) {
         if (!container) throw new Error('PlayerState: container element required');
         if (!WaveSurfer) throw new Error('PlayerState: WaveSurfer reference required');
 
         this.container = container;
         this.d = this._queryDom(container);
         this.WaveSurfer = WaveSurfer;
+        this._emitHostEvent = typeof emitHostEvent === 'function' ? emitHostEvent : null;
+        this.options = options || {};
 
         this.processor = createSpectrogramProcessor();
         this.colorizer = new GpuColorizer();
@@ -70,6 +79,7 @@ export class PlayerState {
         this.spectrogramAbsLogMin = 0;   // absolute range (full data)
         this.spectrogramAbsLogMax = 1;
         this.sampleRateHz = 32000;
+        this.audioHash = null;
         this.amplitudePeakAbs = 1;
         this.currentColorScheme = this.d.colorSchemeSelect.value || 'fire';
         this.volume = 0.8;
@@ -86,6 +96,41 @@ export class PlayerState {
         // ── Playback toggles ──
         this.followPlayback = true;
         this.loopPlayback = false;
+        this.playbackMode = 'normal'; // 'normal' | 'segment'
+        this.transportState = '';
+        this._activeSegmentLabelId = null;
+        this._activeSegmentFilter = null;
+        this._activeSegmentStart = null;
+        this._activeSegmentEnd = null;
+        this._suppressNextPauseHandler = false;
+        this._segmentPlayToken = 0;
+        this._customSegmentPlayback = null;
+        this._lastTimeupdateEmitAt = 0;
+        this._lastSelectionEmitAt = 0;
+        this._lastSelectionStart = NaN;
+        this._lastSelectionEnd = NaN;
+        this._lastViewRangeTextStart = NaN;
+        this._lastViewRangeTextEnd = NaN;
+        this._lastTimeReadoutText = '';
+        this._uiFrameId = 0;
+        this._uiPending = null;
+        this._perf = {
+            enabled: false,
+            panel: null,
+            intervalId: 0,
+            frames: 0,
+            fps: 0,
+            lastFrameTs: 0,
+            longFrames: 0,
+            maxFrameMs: 0,
+            uiFlushes: 0,
+            timeupdateEvents: 0,
+            selectionEvents: 0,
+            seekEvents: 0,
+            transitionEvents: 0,
+            blockedTransitions: 0,
+            lastTransition: '',
+        };
 
         // ── Drag / interaction state ──
         this.draggingPlayhead = false;
@@ -94,6 +139,7 @@ export class PlayerState {
         this.viewportPanStartX = 0;
         this.viewportPanStartScroll = 0;
         this.suppressSeekClick = false;
+        this._blockSeekClickUntil = 0;
         this.overviewMode = null;
         this.overviewDragStartX = 0;
         this.overviewDragStart = 0;
@@ -106,16 +152,158 @@ export class PlayerState {
         this.viewResizeStartY = 0;
         this.viewResizeStartWaveformHeight = DEFAULT_WAVEFORM_HEIGHT;
         this.viewResizeStartSpectrogramHeight = DEFAULT_SPECTROGRAM_DISPLAY_HEIGHT;
+        this._viewResizeFrameId = 0;
+        this._viewResizeNeedsWaveformRedraw = false;
+        this._viewResizeNeedsSpectrogramRedraw = false;
 
         // ── Initial DOM setup ──
         this._applyLocalViewHeights();
         this._updateAmplitudeLabels();
         this._setInitialPlayheadPositions();
         this._updateToggleButtons();
+        this._updateAriaPlaybackPosition(0);
+        this._setTransportState('idle', 'init');
+        this._initPerfOverlay();
 
         // ── Event listeners ──
         this._cleanups = [];
         this._bindEvents();
+        if (this.options.enableTouchGestures !== false) {
+            this._bindTouchGestures();
+        }
+    }
+
+    _emit(event, detail = {}) {
+        if (!this._emitHostEvent) return;
+        this._emitHostEvent(event, detail);
+    }
+
+    _initPerfOverlay() {
+        const byOption = this.options?.enablePerfOverlay === true;
+        let byQuery = false;
+        try {
+            const params = new URLSearchParams(window.location.search || '');
+            byQuery = params.get('perf') === '1';
+        } catch {
+            byQuery = false;
+        }
+        if (!byOption && !byQuery) return;
+        this._perf.enabled = true;
+
+        const panel = document.createElement('div');
+        panel.className = 'abp-perf-overlay';
+        panel.innerHTML = `
+            <div class="abp-perf-title">PERF</div>
+            <div class="abp-perf-body">Initializing...</div>
+        `;
+        this.container.appendChild(panel);
+        this._perf.panel = panel;
+
+        this._perf.intervalId = window.setInterval(() => {
+            this._renderPerfOverlay();
+        }, 500);
+    }
+
+    _perfOnFrame(ts) {
+        if (!this._perf.enabled) return;
+        this._perf.frames += 1;
+        if (this._perf.lastFrameTs > 0) {
+            const frameMs = ts - this._perf.lastFrameTs;
+            if (frameMs > 0) {
+                const fps = 1000 / frameMs;
+                this._perf.fps = this._perf.fps <= 0 ? fps : (this._perf.fps * 0.85 + fps * 0.15);
+            }
+            this._perf.maxFrameMs = Math.max(this._perf.maxFrameMs, frameMs);
+            if (frameMs > 32) this._perf.longFrames += 1;
+        }
+        this._perf.lastFrameTs = ts;
+    }
+
+    _renderPerfOverlay() {
+        if (!this._perf.enabled || !this._perf.panel) return;
+        const body = this._perf.panel.querySelector('.abp-perf-body');
+        if (!body) return;
+        body.innerHTML = [
+            `state: ${this.transportState || 'n/a'}`,
+            `fps: ${this._perf.fps.toFixed(1)} | long>${32}ms: ${this._perf.longFrames}`,
+            `max frame: ${this._perf.maxFrameMs.toFixed(1)}ms | ui flushes: ${this._perf.uiFlushes}`,
+            `timeupdate: ${this._perf.timeupdateEvents} | selection: ${this._perf.selectionEvents} | seek: ${this._perf.seekEvents}`,
+            `transitions: ${this._perf.transitionEvents} | blocked: ${this._perf.blockedTransitions}`,
+            `last: ${this._perf.lastTransition || '-'}`,
+        ].join('<br>');
+
+        // Show rates over each reporting window.
+        this._perf.uiFlushes = 0;
+        this._perf.timeupdateEvents = 0;
+        this._perf.selectionEvents = 0;
+        this._perf.seekEvents = 0;
+        this._perf.maxFrameMs = 0;
+    }
+
+    _setTransportState(nextState, reason = '') {
+        if (!nextState || this.transportState === nextState) return;
+        const fromState = this.transportState || '';
+        if (!canTransitionTransportState(fromState, nextState)) {
+            this._perf.blockedTransitions += 1;
+            this._emit('transporttransitionblocked', { from: fromState, to: nextState, reason });
+        }
+        this.transportState = nextState;
+        this._perf.transitionEvents += 1;
+        this._perf.lastTransition = `${fromState || '∅'} → ${nextState}${reason ? ` (${reason})` : ''}`;
+        this._setPlayState(TRANSPORT_STATE_LABELS[nextState] || nextState);
+        this._emit('transportstatechange', { state: nextState, reason });
+    }
+
+    _scheduleUiUpdate({
+        time = this._getCurrentTime(),
+        fromPlayback = false,
+        centerView = false,
+        emitSeek = false,
+        immediate = false,
+    } = {}) {
+        this._uiPending = this._uiPending || {
+            time: 0,
+            fromPlayback: false,
+            centerView: false,
+            emitSeek: false,
+        };
+        this._uiPending.time = time;
+        this._uiPending.fromPlayback = fromPlayback;
+        this._uiPending.centerView = this._uiPending.centerView || centerView;
+        this._uiPending.emitSeek = this._uiPending.emitSeek || emitSeek;
+
+        if (immediate) {
+            if (this._uiFrameId) {
+                cancelAnimationFrame(this._uiFrameId);
+                this._uiFrameId = 0;
+            }
+            this._flushUiUpdate(performance.now());
+            return;
+        }
+        if (this._uiFrameId) return;
+        this._uiFrameId = requestAnimationFrame((ts) => this._flushUiUpdate(ts));
+    }
+
+    _flushUiUpdate(_ts) {
+        this._uiFrameId = 0;
+        const pending = this._uiPending;
+        this._uiPending = null;
+        if (!pending || !this.audioBuffer) return;
+        this._perfOnFrame(_ts);
+        this._perf.uiFlushes += 1;
+
+        const duration = Math.max(0, this.audioBuffer.duration || 0);
+        const t = Math.max(0, Math.min(pending.time || 0, duration || pending.time || 0));
+        this._updateTimeReadout(t);
+        this._updatePlayhead(t, pending.fromPlayback);
+        if (pending.centerView) this._centerViewportAtTime(t);
+        if (pending.emitSeek) {
+            this._perf.seekEvents += 1;
+            this._emit('seek', {
+                currentTime: t,
+                duration: this.audioBuffer?.duration || 0,
+            });
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -184,6 +372,23 @@ export class PlayerState {
     // ═════════════════════════════════════════════════════════════════
 
     dispose() {
+        this._stopCustomSegmentPlayback('stopped', this._getCurrentTime());
+        if (this._viewResizeFrameId) {
+            cancelAnimationFrame(this._viewResizeFrameId);
+            this._viewResizeFrameId = 0;
+        }
+        if (this._uiFrameId) {
+            cancelAnimationFrame(this._uiFrameId);
+            this._uiFrameId = 0;
+        }
+        if (this._perf.intervalId) {
+            clearInterval(this._perf.intervalId);
+            this._perf.intervalId = 0;
+        }
+        if (this._perf.panel?.parentNode) {
+            this._perf.panel.parentNode.removeChild(this._perf.panel);
+            this._perf.panel = null;
+        }
         for (let i = this._cleanups.length - 1; i >= 0; i--) this._cleanups[i]();
         this._cleanups.length = 0;
         this.processor.dispose();
@@ -200,12 +405,14 @@ export class PlayerState {
 
         this.d.fileInfo.innerHTML = `<span class="statusbar-label">${file.name}</span>`;
         this.d.fileInfo.classList.add('loading');
-        this._setPlayState('Loading');
+        this._setTransportState('loading', 'file-load');
 
         try {
-            const audioBuffer = await decodeArrayBuffer(await file.arrayBuffer());
+            const fileBuffer = await file.arrayBuffer();
+            const audioBuffer = await decodeArrayBuffer(fileBuffer);
             this.audioBuffer = audioBuffer;
             this.sampleRateHz = audioBuffer.sampleRate;
+            this.audioHash = await sha256ArrayBuffer(fileBuffer).catch(() => null);
             this.amplitudePeakAbs = computeAmplitudePeak(audioBuffer.getChannelData(0));
             this._updateAmplitudeLabels();
 
@@ -217,7 +424,7 @@ export class PlayerState {
             this._setPixelsPerSecond(DEFAULT_ZOOM_PPS, false);
             this._setTransportEnabled(true);
             this._updateToggleButtons();
-            this._setPlayState('Ready');
+            this._setTransportState('ready', 'file-loaded');
             this.d.fileInfo.classList.remove('loading');
 
             this._setupWaveSurfer(file);
@@ -228,8 +435,9 @@ export class PlayerState {
             this._seekToTime(0, true);
         } catch (error) {
             console.error('Fehler beim Laden der Datei:', error);
-            this._setPlayState('Error');
+            this._setTransportState('error', 'file-load-failed');
             this.d.fileInfo.classList.remove('loading');
+            this._emit('error', { message: error?.message || String(error), source: 'file' });
             alert('Fehler beim Laden der Audio-Datei');
         }
     }
@@ -241,7 +449,7 @@ export class PlayerState {
     async loadUrl(url) {
         this.d.fileInfo.innerHTML = `<span class="statusbar-label">Loading…</span>`;
         this.d.fileInfo.classList.add('loading');
-        this._setPlayState('Loading');
+        this._setTransportState('loading', 'url-load');
 
         try {
             const response = await fetch(url);
@@ -251,6 +459,7 @@ export class PlayerState {
             const audioBuffer = await decodeArrayBuffer(arrayBuffer);
             this.audioBuffer = audioBuffer;
             this.sampleRateHz = audioBuffer.sampleRate;
+            this.audioHash = await sha256ArrayBuffer(arrayBuffer).catch(() => null);
             this.amplitudePeakAbs = computeAmplitudePeak(audioBuffer.getChannelData(0));
             this._updateAmplitudeLabels();
 
@@ -265,7 +474,7 @@ export class PlayerState {
             this._setPixelsPerSecond(DEFAULT_ZOOM_PPS, false);
             this._setTransportEnabled(true);
             this._updateToggleButtons();
-            this._setPlayState('Ready');
+            this._setTransportState('ready', 'url-loaded');
             this.d.fileInfo.classList.remove('loading');
 
             // Pass the original URL to WaveSurfer (data: URLs work in
@@ -278,8 +487,9 @@ export class PlayerState {
             this._seekToTime(0, true);
         } catch (error) {
             console.error('Error loading audio URL:', error);
-            this._setPlayState('Error');
+            this._setTransportState('error', 'url-load-failed');
             this.d.fileInfo.classList.remove('loading');
+            this._emit('error', { message: error?.message || String(error), source: 'url' });
         }
     }
 
@@ -313,37 +523,67 @@ export class PlayerState {
             ws.zoom(this.pixelsPerSecond);
             ws.setVolume(this.volume);
             this._seekToTime(0, true);
+            this._lastTimeupdateEmitAt = 0;
+            this._lastSelectionEmitAt = 0;
+            this._lastSelectionStart = NaN;
+            this._lastSelectionEnd = NaN;
         });
 
         ws.on('timeupdate', (t) => {
-            this._updateTimeReadout(t);
-            this._updatePlayhead(t, true);
+            this._perf.timeupdateEvents += 1;
+            this._scheduleUiUpdate({ time: t, fromPlayback: true });
+            const now = performance.now();
+            if (now - this._lastTimeupdateEmitAt >= 66) {
+                this._lastTimeupdateEmitAt = now;
+                this._emit('timeupdate', {
+                    currentTime: t,
+                    duration: this.audioBuffer?.duration || 0,
+                });
+            }
         });
 
         ws.on('play', () => {
             this.d.playPauseBtn.classList.add('playing');
-            this._setPlayState(this.loopPlayback ? 'Playing (Loop)' : 'Playing');
+            if (this.playbackMode === 'segment') {
+                this._setTransportState('playing_segment', 'engine-play');
+                return;
+            }
+            this._setTransportState(this.loopPlayback ? 'playing_loop' : 'playing', 'engine-play');
         });
 
         ws.on('pause', () => {
+            if (this._suppressNextPauseHandler) {
+                this._suppressNextPauseHandler = false;
+                return;
+            }
             this.d.playPauseBtn.classList.remove('playing');
-            if (this.audioBuffer) {
+            if (this.playbackMode === 'segment' && this._activeSegmentEnd != null) {
+                this._setTransportState('paused_segment', 'engine-pause');
+            } else if (this.audioBuffer) {
                 const atEnd = ws.getCurrentTime() >= this.audioBuffer.duration - 0.01;
-                this._setPlayState(atEnd ? 'Stopped' : 'Paused');
+                this._setTransportState(atEnd ? 'stopped' : 'paused', 'engine-pause');
             } else {
-                this._setPlayState('Paused');
+                this._setTransportState('paused', 'engine-pause');
             }
         });
 
         ws.on('finish', () => {
+            if (this.playbackMode === 'segment') {
+                this.playbackMode = 'normal';
+                this._activeSegmentLabelId = null;
+                this._activeSegmentFilter = null;
+                this._activeSegmentStart = null;
+                this._activeSegmentEnd = null;
+                this._segmentPlayToken++;
+            }
             if (this.loopPlayback) {
                 this._seekToTime(0, this.followPlayback);
                 ws.play();
                 return;
             }
             this.d.playPauseBtn.classList.remove('playing');
-            this._setPlayState('Stopped');
-            if (this.audioBuffer) this._updatePlayhead(this.audioBuffer.duration, false);
+            this._setTransportState('stopped', 'engine-finish');
+            if (this.audioBuffer) this._scheduleUiUpdate({ time: this.audioBuffer.duration, fromPlayback: false, immediate: true });
         });
 
         this.wavesurfer = ws;
@@ -354,24 +594,337 @@ export class PlayerState {
     // ═════════════════════════════════════════════════════════════════
 
     _togglePlayPause() {
+        if (this._customSegmentPlayback) {
+            this._stopCustomSegmentPlayback('paused', this._customSegmentPlayback.currentTimeSec);
+            return;
+        }
+        this.playbackMode = 'normal';
+        this._activeSegmentLabelId = null;
+        this._activeSegmentFilter = null;
+        this._activeSegmentStart = null;
+        this._activeSegmentEnd = null;
+        this._segmentPlayToken++;
         if (this.wavesurfer && this.audioBuffer) this.wavesurfer.playPause();
     }
 
     _stopPlayback() {
+        if (this._customSegmentPlayback) {
+            this._stopCustomSegmentPlayback('stopped', 0);
+        }
         if (!this.wavesurfer) return;
+        this.playbackMode = 'normal';
+        this._activeSegmentLabelId = null;
+        this._activeSegmentFilter = null;
+        this._activeSegmentStart = null;
+        this._activeSegmentEnd = null;
+        this._segmentPlayToken++;
         this.wavesurfer.pause();
         this._seekToTime(0, true);
-        this._setPlayState('Stopped');
+        this._setTransportState('stopped', 'stop-control');
         this.d.playPauseBtn.classList.remove('playing');
     }
 
-    _seekToTime(timeSec, centerView = false) {
+    playSegment(startSec, endSec, options = {}) {
+        if (!this.audioBuffer || !this.wavesurfer) return;
+        this._clearPlaybackFilter();
+        const dur = this.audioBuffer.duration;
+        const start = Math.max(0, Math.min(startSec, dur));
+        const end = Math.max(0, Math.min(endSec, dur));
+        if (end - start < 0.01) return;
+        const token = ++this._segmentPlayToken;
+        this.playbackMode = 'segment';
+        this._activeSegmentLabelId = options?.labelId || null;
+        this._activeSegmentFilter = null;
+        this._activeSegmentStart = start;
+        this._activeSegmentEnd = end;
+        if (this.wavesurfer.isPlaying()) {
+            this._suppressNextPauseHandler = true;
+            this.wavesurfer.pause();
+        }
+        this._seekToTime(start, false);
+        if (token !== this._segmentPlayToken) return;
+
+        const runPlay = () => {
+            if (token !== this._segmentPlayToken) return;
+            try {
+                if (this.loopPlayback) {
+                    this._seekToTime(start, false, { allowCustomPlayback: true });
+                    this.wavesurfer.play();
+                    this._emit('segmentplaystart', { start, end, loop: true });
+                    return;
+                }
+                // Prefer native segment playback if available in this WaveSurfer build.
+                const maybePromise = this.wavesurfer.play(start, end);
+                this._emit('segmentplaystart', { start, end });
+                if (maybePromise && typeof maybePromise.then === 'function') {
+                    maybePromise.catch(() => {
+                        if (token !== this._segmentPlayToken) return;
+                        this._seekToTime(start, false);
+                        this.wavesurfer?.play();
+                    });
+                }
+            } catch {
+                if (token !== this._segmentPlayToken) return;
+                this._seekToTime(start, false);
+                this.wavesurfer?.play();
+                this._emit('segmentplaystart', { start, end });
+            }
+        };
+
+        try {
+            // One frame delay prevents play/pause races after click+drag interactions.
+            window.requestAnimationFrame(runPlay);
+        } catch {
+            runPlay();
+        }
+    }
+
+    playBandpassedSegment(startSec, endSec, freqMinHz, freqMaxHz, options = {}) {
         if (!this.audioBuffer) return;
+        const dur = this.audioBuffer.duration;
+        const start = Math.max(0, Math.min(startSec, dur));
+        const end = Math.max(0, Math.min(endSec, dur));
+        if (end - start < 0.01) return;
+        const nyquist = Math.max(100, this.audioBuffer.sampleRate * 0.5 - 10);
+        const fLo = Math.max(20, Math.min(freqMinHz, freqMaxHz, nyquist - 5));
+        const fHi = Math.max(fLo + 5, Math.min(Math.max(freqMinHz, freqMaxHz), nyquist));
+        const center = Math.sqrt(fLo * fHi);
+        const bandwidth = Math.max(10, fHi - fLo);
+        const q = Math.max(0.25, Math.min(40, center / bandwidth));
+
+        this._stopCustomSegmentPlayback('stopped', start);
+        this._clearPlaybackFilter();
+
+        if (this.wavesurfer?.isPlaying()) {
+            this._suppressNextPauseHandler = true;
+            this.wavesurfer.pause();
+        }
+        this._seekToTime(start, false, { allowCustomPlayback: true });
+
+        const Ctor = window.AudioContext || window.webkitAudioContext;
+        if (!Ctor) {
+            this.playSegment(start, end, { labelId: options?.labelId });
+            return;
+        }
+
+        const token = ++this._segmentPlayToken;
+        this.playbackMode = 'segment';
+        this._activeSegmentLabelId = options?.labelId || null;
+        this._activeSegmentStart = start;
+        this._activeSegmentEnd = end;
+        this._activeSegmentFilter = {
+            type: 'bandpass',
+            freqMinHz: fLo,
+            freqMaxHz: fHi,
+        };
+
+        const ctx = new Ctor();
+        const bandpass = ctx.createBiquadFilter();
+        bandpass.type = 'bandpass';
+        bandpass.frequency.value = center;
+        bandpass.Q.value = q;
+
+        const gain = ctx.createGain();
+        gain.gain.value = this.muted ? 0 : this.volume;
+
+        bandpass.connect(gain);
+        gain.connect(ctx.destination);
+
+        const playback = {
+            token,
+            ctx,
+            source: null,
+            bandpass,
+            gain,
+            startSec: start,
+            endSec: end,
+            startAtCtx: 0,
+            runStartSec: start,
+            sourceGeneration: 0,
+            rafId: 0,
+            currentTimeSec: start,
+        };
+        this._customSegmentPlayback = playback;
+        this._startCustomSegmentSource(playback);
+        this._setTransportState('playing_segment', 'bandpass-segment-start');
+        this._emit('segmentplaystart', { start, end, filter: { type: 'bandpass', freqMinHz: fLo, freqMaxHz: fHi } });
+
+        const onFrame = () => {
+            if (!this._customSegmentPlayback || this._customSegmentPlayback.token !== token) return;
+            const elapsed = Math.max(0, ctx.currentTime - playback.startAtCtx);
+            const t = Math.min(playback.endSec, playback.runStartSec + elapsed);
+            playback.currentTimeSec = t;
+            this._scheduleUiUpdate({ time: t, fromPlayback: true });
+            if (t >= playback.endSec - 0.002) {
+                if (this.loopPlayback) {
+                    this._loopCustomSegmentPlayback(playback);
+                    playback.rafId = requestAnimationFrame(onFrame);
+                    return;
+                }
+                this._stopCustomSegmentPlayback('stopped', playback.endSec, { emitEnd: true });
+                return;
+            }
+            playback.rafId = requestAnimationFrame(onFrame);
+        };
+
+        playback.rafId = requestAnimationFrame(onFrame);
+    }
+
+    _startCustomSegmentSource(playback, source = null, startAtSec = null) {
+        if (!playback || !this._customSegmentPlayback || this._customSegmentPlayback.token !== playback.token) return;
+        playback.sourceGeneration = (playback.sourceGeneration || 0) + 1;
+        const generation = playback.sourceGeneration;
+        const nextSource = source || playback.ctx.createBufferSource();
+        nextSource.buffer = this.audioBuffer;
+        nextSource.connect(playback.bandpass);
+        nextSource.onended = () => {
+            if (!this._customSegmentPlayback || this._customSegmentPlayback.token !== playback.token) return;
+            if (playback.sourceGeneration !== generation) return;
+            if (this.loopPlayback) {
+                this._loopCustomSegmentPlayback(playback);
+                return;
+            }
+            this._stopCustomSegmentPlayback('stopped', playback.endSec, { emitEnd: true });
+        };
+        playback.source = nextSource;
+        playback.runStartSec = startAtSec == null ? playback.startSec : Math.max(playback.startSec, Math.min(startAtSec, playback.endSec - 0.001));
+        playback.startAtCtx = playback.ctx.currentTime + 0.005;
+        nextSource.start(playback.startAtCtx, playback.runStartSec, playback.endSec - playback.runStartSec);
+    }
+
+    _loopCustomSegmentPlayback(playback) {
+        if (!playback || !this._customSegmentPlayback || this._customSegmentPlayback.token !== playback.token) return;
+        playback.currentTimeSec = playback.startSec;
+        this._scheduleUiUpdate({
+            time: playback.startSec,
+            fromPlayback: false,
+            immediate: true,
+        });
+        this._emit('segmentloop', { start: playback.startSec, end: playback.endSec, filter: 'bandpass' });
+        this._startCustomSegmentSource(playback);
+    }
+
+    updateActiveSegmentFromLabel(label) {
+        if (!label || this.playbackMode !== 'segment') return;
+        const labelId = label.id || null;
+        if (this._activeSegmentLabelId && labelId && this._activeSegmentLabelId !== labelId) return;
+        const dur = this.audioBuffer?.duration || 0;
+        if (dur <= 0) return;
+
+        const start = Math.max(0, Math.min(Number(label.start ?? 0), dur));
+        const end = Math.max(start + 0.01, Math.min(Number(label.end ?? start + 0.01), dur));
+        this._activeSegmentStart = start;
+        this._activeSegmentEnd = end;
+
+        if (this._customSegmentPlayback) {
+            this._retargetCustomSegmentPlayback({
+                start,
+                end,
+                freqMinHz: Number(label.freqMin),
+                freqMaxHz: Number(label.freqMax),
+            });
+            return;
+        }
+
+        const now = this._getCurrentTime();
+        if (now < start || now > end) {
+            this._seekToTime(start, false, { allowCustomPlayback: true });
+            if (this.loopPlayback && !this.wavesurfer?.isPlaying()) this.wavesurfer?.play();
+        }
+    }
+
+    _retargetCustomSegmentPlayback({ start, end, freqMinHz, freqMaxHz }) {
+        const playback = this._customSegmentPlayback;
+        if (!playback || !this.audioBuffer) return;
+
+        playback.startSec = start;
+        playback.endSec = end;
+
+        const hasFreq = Number.isFinite(freqMinHz) && Number.isFinite(freqMaxHz);
+        if (hasFreq) {
+            const nyquist = Math.max(100, this.audioBuffer.sampleRate * 0.5 - 10);
+            const fLo = Math.max(20, Math.min(freqMinHz, freqMaxHz, nyquist - 5));
+            const fHi = Math.max(fLo + 5, Math.min(Math.max(freqMinHz, freqMaxHz), nyquist));
+            const center = Math.sqrt(fLo * fHi);
+            const bandwidth = Math.max(10, fHi - fLo);
+            const q = Math.max(0.25, Math.min(40, center / bandwidth));
+            playback.bandpass.frequency.value = center;
+            playback.bandpass.Q.value = q;
+            this._activeSegmentFilter = { type: 'bandpass', freqMinHz: fLo, freqMaxHz: fHi };
+        }
+
+        const desiredStart = Math.max(start, Math.min(playback.currentTimeSec || start, end - 0.001));
+        this._restartCustomSegmentSource(playback, desiredStart);
+    }
+
+    _restartCustomSegmentSource(playback, atSec) {
+        if (!playback || !this._customSegmentPlayback || this._customSegmentPlayback.token !== playback.token) return;
+        playback.sourceGeneration = (playback.sourceGeneration || 0) + 1;
+        if (playback.source) {
+            playback.source.onended = null;
+            try { playback.source.stop(); } catch {}
+            try { playback.source.disconnect(); } catch {}
+            playback.source = null;
+        }
+        playback.currentTimeSec = atSec;
+        this._scheduleUiUpdate({ time: atSec, fromPlayback: false, immediate: true });
+        this._startCustomSegmentSource(playback, null, atSec);
+    }
+
+    _stopCustomSegmentPlayback(reason = 'stopped', targetTimeSec = null, options = {}) {
+        const active = this._customSegmentPlayback;
+        if (!active) return;
+
+        if (active.rafId) cancelAnimationFrame(active.rafId);
+        active.rafId = 0;
+        if (active.source) {
+            active.source.onended = null;
+            try { active.source.stop(); } catch {}
+            try { active.source.disconnect(); } catch {}
+        }
+        try { active.bandpass?.disconnect(); } catch {}
+        try { active.gain.disconnect(); } catch {}
+        try { active.ctx.close(); } catch {}
+
+        this._customSegmentPlayback = null;
+        this._activeSegmentLabelId = null;
+        this._activeSegmentFilter = null;
+        this._activeSegmentStart = null;
+        this._activeSegmentEnd = null;
+        this.playbackMode = 'normal';
+        this._segmentPlayToken++;
+
+        if (Number.isFinite(targetTimeSec)) {
+            this._scheduleUiUpdate({ time: targetTimeSec, fromPlayback: false, immediate: true });
+        }
+        this.d.playPauseBtn.classList.remove('playing');
+        this._setTransportState(reason === 'paused' ? 'paused_segment' : 'stopped', 'bandpass-segment-stop');
+        if (options.emitEnd) {
+            this._emit('segmentplayend', { end: targetTimeSec ?? 0 });
+        }
+    }
+
+    _clearPlaybackFilter() {
+        if (!this.wavesurfer) return;
+        if (typeof this.wavesurfer.setFilter === 'function') {
+            try { this.wavesurfer.setFilter(null); } catch {}
+        }
+    }
+
+    _seekToTime(timeSec, centerView = false, options = {}) {
+        if (!this.audioBuffer) return;
+        if (this._customSegmentPlayback && options.allowCustomPlayback !== true) {
+            this._stopCustomSegmentPlayback('paused', this._customSegmentPlayback.currentTimeSec);
+        }
         const t = Math.max(0, Math.min(timeSec, this.audioBuffer.duration));
         if (this.wavesurfer) this.wavesurfer.setTime(t);
-        this._updateTimeReadout(t);
-        this._updatePlayhead(t, false);
-        if (centerView) this._centerViewportAtTime(t);
+        this._scheduleUiUpdate({
+            time: t,
+            fromPlayback: false,
+            centerView,
+            emitSeek: true,
+            immediate: true,
+        });
     }
 
     _seekByDelta(deltaSec) {
@@ -379,12 +932,33 @@ export class PlayerState {
         this._seekToTime(this._getCurrentTime() + deltaSec, false);
     }
 
+    _seekRelative(deltaSec) {
+        this._seekByDelta(deltaSec);
+    }
+
     _getCurrentTime() {
+        if (this._customSegmentPlayback) return this._customSegmentPlayback.currentTimeSec;
         return this.wavesurfer ? this.wavesurfer.getCurrentTime() : 0;
     }
 
     _updateTimeReadout(t) {
-        this.d.currentTimeDisplay.textContent = formatTime(t);
+        const nextText = formatTime(t);
+        if (nextText !== this._lastTimeReadoutText) {
+            this._lastTimeReadoutText = nextText;
+            this.d.currentTimeDisplay.textContent = nextText;
+        }
+        this._updateAriaPlaybackPosition(t);
+    }
+
+    _updateAriaPlaybackPosition(currentTimeSec) {
+        const slider = this.d.canvasWrapper;
+        if (!slider) return;
+        const duration = this.audioBuffer?.duration || 0;
+        const now = Math.max(0, Math.min(currentTimeSec || 0, duration || currentTimeSec || 0));
+        slider.setAttribute('aria-valuemin', '0');
+        slider.setAttribute('aria-valuemax', String(duration.toFixed(3)));
+        slider.setAttribute('aria-valuenow', String(now.toFixed(3)));
+        slider.setAttribute('aria-valuetext', `${formatTime(now)} of ${formatTime(duration)}`);
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -413,6 +987,28 @@ export class PlayerState {
         }
 
         this._syncOverviewWindowToViewport();
+
+        if (!this._customSegmentPlayback && this._activeSegmentEnd != null && currentTime >= this._activeSegmentEnd - 0.005) {
+            const start = this._activeSegmentStart ?? 0;
+            const end = this._activeSegmentEnd;
+            if (this.loopPlayback && this.wavesurfer?.isPlaying()) {
+                this._seekToTime(start, false, { allowCustomPlayback: true });
+                this._emit('segmentloop', { start, end, filter: 'none' });
+                return;
+            }
+            this._activeSegmentStart = null;
+            this._activeSegmentLabelId = null;
+            this._activeSegmentFilter = null;
+            this._activeSegmentEnd = null;
+            this.playbackMode = 'normal';
+            this._segmentPlayToken++;
+            this._suppressNextPauseHandler = true;
+            this.wavesurfer?.pause();
+            this._seekToTime(end, false);
+            this.d.playPauseBtn.classList.remove('playing');
+            this._setTransportState('stopped', 'segment-end');
+            this._emit('segmentplayend', { end });
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -421,9 +1017,9 @@ export class PlayerState {
 
     async _generateSpectrogram() {
         if (!this.audioBuffer) return;
-        this._setPlayState('Rendering...');
+        this._setTransportState('rendering', 'spectrogram-generate');
 
-        const result = await this.processor.compute(this.audioBuffer.getChannelData(0), {
+        const options = {
             fftSize: parseInt(this.d.fftSizeSelect.value, 10),
             sampleRate: this.audioBuffer.sampleRate,
             frameRate: PERCH_FRAME_RATE,
@@ -432,25 +1028,164 @@ export class PlayerState {
             pcenBias: PERCH_PCEN_BIAS,
             pcenRoot: PERCH_PCEN_ROOT,
             pcenSmoothing: PERCH_PCEN_SMOOTHING,
-        });
+        };
 
-        this.spectrogramData = result.data;
-        this.spectrogramFrames = result.nFrames;
-        this.spectrogramMels = result.nMels;
+        try {
+            const channelData = this.audioBuffer.getChannelData(0);
+            let result;
+            let fromCache = false;
+            let cacheEntry = null;
+            const cacheKey = this.audioHash ? buildSpectrogramCacheKey({
+                fileHash: this.audioHash,
+                ...options,
+            }) : null;
 
-        this._updateSpectrogramStats();
+            if (cacheKey) {
+                const cached = await getSpectrogramCacheEntry(cacheKey);
+                cacheEntry = cached;
+                if (cached?.spectrogramData && cached?.nFrames && cached?.nMels) {
+                    this._emit('cachehit', { cacheKey });
+                    result = {
+                        data: new Float32Array(cached.spectrogramData),
+                        nFrames: cached.nFrames,
+                        nMels: cached.nMels,
+                    };
+                    fromCache = true;
+                    this.spectrogramAbsLogMin = cached.absLogMin ?? 0;
+                    this.spectrogramAbsLogMax = cached.absLogMax ?? 1;
+                    if (Number.isFinite(cached.floorPct) && Number.isFinite(cached.ceilPct)) {
+                        this.d.floorSlider.value = Math.round(cached.floorPct);
+                        this.d.ceilSlider.value = Math.round(cached.ceilPct);
+                    }
+                    if (Number.isFinite(cached.maxFreq)) {
+                        const optionsList = Array.from(this.d.maxFreqSelect.options);
+                        let best = optionsList[optionsList.length - 1];
+                        for (const opt of optionsList) {
+                            if (parseFloat(opt.value) >= cached.maxFreq) { best = opt; break; }
+                        }
+                        this.d.maxFreqSelect.value = best.value;
+                    }
+                } else {
+                    this._emit('cachemiss', { cacheKey });
+                }
+            }
 
-        // Auto-optimize on first load (sets slider values only)
-        this._autoContrast();
-        this._autoFrequency();
+            const shouldUseProgressive = this.options.enableProgressiveSpectrogram === true
+                && this.audioBuffer.duration >= PROGRESSIVE_MIN_DURATION_SEC
+                && typeof this.processor.computeProgressive === 'function';
 
-        // Stage 1: build grayscale (expensive, once)
-        this._buildSpectrogramGrayscale();
-        // Stage 2: colorize (fast, GPU or JS)
-        this._buildSpectrogramBaseImage();
-        this._drawSpectrogram();
-        this._syncOverviewWindowToViewport();
-        this._setPlayState('Ready');
+            if (!result) {
+                if (shouldUseProgressive) {
+                    const chunkResults = [];
+                    for await (const progress of this.processor.computeProgressive(channelData, {
+                        ...options,
+                        chunkSeconds: PROGRESSIVE_CHUNK_SECONDS,
+                    })) {
+                        chunkResults.push(progress.result);
+                        this._emit('progress', {
+                            chunk: progress.chunk,
+                            totalChunks: progress.totalChunks,
+                            percent: progress.percent,
+                        });
+                    }
+                    result = this._mergeProgressiveResults(chunkResults, options.nMels);
+                } else {
+                    result = await this.processor.compute(channelData, options);
+                }
+            }
+
+            this.spectrogramData = result.data;
+            this.spectrogramFrames = result.nFrames;
+            this.spectrogramMels = result.nMels;
+
+            if (!fromCache) {
+                this._updateSpectrogramStats();
+                // Auto-optimize on first load (sets slider values only)
+                this._autoContrast();
+                this._autoFrequency();
+            }
+
+            const cachedGray = cacheEntry?.grayscaleTexture;
+            const selectedMaxFreq = parseFloat(this.d.maxFreqSelect.value);
+            const canReuseGray = fromCache
+                && cachedGray
+                && Number.isFinite(cachedGray.maxFreq)
+                && Math.abs(cachedGray.maxFreq - selectedMaxFreq) < 1e-6
+                && cachedGray.width > 0
+                && cachedGray.height > 0;
+
+            if (canReuseGray) {
+                this.spectrogramGrayInfo = {
+                    gray: new Uint8Array(cachedGray.gray),
+                    width: cachedGray.width,
+                    height: cachedGray.height,
+                };
+                if (this.colorizer.ok) {
+                    const { gray, width, height } = this.spectrogramGrayInfo;
+                    this._gpuReady = this.colorizer.uploadGrayscale(gray, width, height);
+                } else {
+                    this._gpuReady = false;
+                }
+            } else {
+                // Stage 1: build grayscale (expensive, once)
+                this._buildSpectrogramGrayscale();
+            }
+            // Stage 2: colorize (fast, GPU or JS)
+            this._buildSpectrogramBaseImage();
+            this._drawSpectrogram();
+            this._syncOverviewWindowToViewport();
+            this._setTransportState('ready', 'spectrogram-ready');
+
+            if (cacheKey && this.spectrogramData?.length) {
+                const cacheWriteOk = await putSpectrogramCacheEntry({
+                    cacheKey,
+                    createdAt: Date.now(),
+                    nFrames: this.spectrogramFrames,
+                    nMels: this.spectrogramMels,
+                    absLogMin: this.spectrogramAbsLogMin,
+                    absLogMax: this.spectrogramAbsLogMax,
+                    floorPct: parseFloat(this.d.floorSlider.value),
+                    ceilPct: parseFloat(this.d.ceilSlider.value),
+                    maxFreq: parseFloat(this.d.maxFreqSelect.value),
+                    spectrogramData: new Float32Array(this.spectrogramData),
+                    grayscaleTexture: this.spectrogramGrayInfo ? {
+                        gray: new Uint8Array(this.spectrogramGrayInfo.gray),
+                        width: this.spectrogramGrayInfo.width,
+                        height: this.spectrogramGrayInfo.height,
+                        maxFreq: parseFloat(this.d.maxFreqSelect.value),
+                    } : null,
+                    metadata: {
+                        sampleRate: this.audioBuffer.sampleRate,
+                        duration: this.audioBuffer.duration,
+                        fftSize: options.fftSize,
+                    },
+                });
+                if (cacheWriteOk) this._emit('cachewrite', { cacheKey });
+            }
+            this._emit('ready', {
+                duration: this.audioBuffer.duration,
+                sampleRate: this.audioBuffer.sampleRate,
+                nFrames: this.spectrogramFrames,
+                nMels: this.spectrogramMels,
+            });
+        } catch (error) {
+            this._setTransportState('error', 'spectrogram-error');
+            this._emit('error', { message: error?.message || String(error), source: 'spectrogram' });
+            throw error;
+        }
+    }
+
+    _mergeProgressiveResults(chunkResults, nMels) {
+        let totalFrames = 0;
+        for (const chunk of chunkResults) totalFrames += chunk.nFrames;
+
+        const data = new Float32Array(totalFrames * nMels);
+        let frameOffset = 0;
+        for (const chunk of chunkResults) {
+            data.set(chunk.data, frameOffset * nMels);
+            frameOffset += chunk.nFrames;
+        }
+        return { data, nFrames: totalFrames, nMels };
     }
 
     _updateSpectrogramStats() {
@@ -499,6 +1234,7 @@ export class PlayerState {
             if (parseFloat(opt.value) >= hzValue) { best = opt; break; }
         }
         this.d.maxFreqSelect.value = best.value;
+        this._emit('spectrogramscalechange', { maxFreq: parseFloat(this.d.maxFreqSelect.value) });
         this._createFrequencyLabels();
         if (redraw) {
             this._buildSpectrogramGrayscale();  // maxFreq changed → Stage 1
@@ -512,6 +1248,9 @@ export class PlayerState {
     _setVolume(val) {
         this.volume = Math.max(0, Math.min(1, val));
         if (this.wavesurfer) this.wavesurfer.setVolume(this.volume);
+        if (this._customSegmentPlayback?.gain) {
+            this._customSegmentPlayback.gain.gain.value = this.muted ? 0 : this.volume;
+        }
         this._updateVolumeIcon();
     }
 
@@ -524,6 +1263,7 @@ export class PlayerState {
             this.preMuteVolume = this.volume;
             this.muted = true;
             if (this.wavesurfer) this.wavesurfer.setVolume(0);
+            if (this._customSegmentPlayback?.gain) this._customSegmentPlayback.gain.gain.value = 0;
             this._updateVolumeIcon();
         }
     }
@@ -597,8 +1337,7 @@ export class PlayerState {
             spectrogramFrames: this.spectrogramFrames,
         });
 
-        this._syncOverviewWindowToViewport();
-        this._updatePlayhead(this._getCurrentTime(), false);
+        this._scheduleUiUpdate({ time: this._getCurrentTime(), fromPlayback: false, immediate: true });
     }
 
     _requestSpectrogramRedraw() {
@@ -624,8 +1363,7 @@ export class PlayerState {
             waveformHeight: this.waveformDisplayHeight,
             amplitudePeakAbs: this.amplitudePeakAbs,
         });
-        this._syncOverviewWindowToViewport();
-        this._updatePlayhead(this._getCurrentTime(), false);
+        this._scheduleUiUpdate({ time: this._getCurrentTime(), fromPlayback: false, immediate: true });
     }
 
     _drawOverviewWaveform() {
@@ -635,7 +1373,7 @@ export class PlayerState {
             overviewContainer: this.d.overviewContainer,
             amplitudePeakAbs: this.amplitudePeakAbs,
         });
-        this._syncOverviewWindowToViewport();
+        this._scheduleUiUpdate({ time: this._getCurrentTime(), fromPlayback: false, immediate: true });
     }
 
     _createFrequencyLabels() {
@@ -692,7 +1430,7 @@ export class PlayerState {
         this.d.waveformWrapper.scrollLeft = this.d.canvasWrapper.scrollLeft;
 
         this.scrollSyncLock = false;
-        this._syncOverviewWindowToViewport();
+        this._scheduleUiUpdate({ time: this._getCurrentTime(), fromPlayback: false });
     }
 
     _setPixelsPerSecond(nextPps, redraw, anchorTime, anchorPixel) {
@@ -719,6 +1457,7 @@ export class PlayerState {
             this.pixelsPerSecond = effectivePps;
             this.d.zoomSlider.value = String(Math.round(effectivePps / sliderStep) * sliderStep);
             this.d.zoomValue.textContent = `${Math.round(effectivePps)} px/s`;
+            this._emit('zoomchange', { pixelsPerSecond: this.pixelsPerSecond });
 
             if (this.wavesurfer) this.wavesurfer.zoom(effectivePps);
             if (this.audioBuffer && redraw) {
@@ -734,6 +1473,15 @@ export class PlayerState {
         if (!this.audioBuffer) return;
         const fitPps = this._getViewportWidth() / Math.max(0.05, this.audioBuffer.duration);
         this._setPixelsPerSecond(fitPps, true, 0, 0);
+    }
+
+    _zoomByScale(scale, centerClientX, source = 'spectrogram') {
+        if (!this.audioBuffer) return;
+        const wrapper = source === 'waveform' ? this.d.waveformWrapper : this.d.canvasWrapper;
+        const rect = wrapper.getBoundingClientRect();
+        const localX = Math.max(0, Math.min(rect.width, centerClientX - rect.left));
+        const anchorTime = (wrapper.scrollLeft + localX) / Math.max(this.pixelsPerSecond, 0.01);
+        this._setPixelsPerSecond(this.pixelsPerSecond * scale, true, anchorTime, localX);
     }
 
     _centerViewportAtTime(timeSec) {
@@ -767,10 +1515,34 @@ export class PlayerState {
         const startTime = this.d.canvasWrapper.scrollLeft / this.pixelsPerSecond;
         const endTime = Math.min(this.audioBuffer.duration, startTime + viewTime);
 
-        this.windowStartNorm = startTime / this.audioBuffer.duration;
-        this.windowEndNorm = endTime / this.audioBuffer.duration;
-        this._updateOverviewWindowElement();
-        this.d.viewRangeDisplay.textContent = `${formatSecondsShort(startTime)} – ${formatSecondsShort(endTime)}`;
+        const nextStartNorm = startTime / this.audioBuffer.duration;
+        const nextEndNorm = endTime / this.audioBuffer.duration;
+        const moved = Math.abs(nextStartNorm - this.windowStartNorm) > 1e-5
+            || Math.abs(nextEndNorm - this.windowEndNorm) > 1e-5;
+
+        this.windowStartNorm = nextStartNorm;
+        this.windowEndNorm = nextEndNorm;
+        if (moved) this._updateOverviewWindowElement();
+
+        const rangeChanged = Math.abs(startTime - this._lastViewRangeTextStart) > 0.05
+            || Math.abs(endTime - this._lastViewRangeTextEnd) > 0.05;
+        if (rangeChanged) {
+            this._lastViewRangeTextStart = startTime;
+            this._lastViewRangeTextEnd = endTime;
+            this.d.viewRangeDisplay.textContent = `${formatSecondsShort(startTime)} – ${formatSecondsShort(endTime)}`;
+        }
+
+        const now = performance.now();
+        const selectionChanged = !Number.isFinite(this._lastSelectionStart)
+            || Math.abs(startTime - this._lastSelectionStart) > 0.03
+            || Math.abs(endTime - this._lastSelectionEnd) > 0.03;
+        if (selectionChanged && (now - this._lastSelectionEmitAt >= 80)) {
+            this._lastSelectionEmitAt = now;
+            this._lastSelectionStart = startTime;
+            this._lastSelectionEnd = endTime;
+            this._perf.selectionEvents += 1;
+            this._emit('selection', { start: startTime, end: endTime });
+        }
     }
 
     _updateOverviewWindowElement() {
@@ -831,15 +1603,22 @@ export class PlayerState {
     // ═════════════════════════════════════════════════════════════════
 
     _handleCanvasClick(e) {
+        if (performance.now() < this._blockSeekClickUntil) return;
         if (this.suppressSeekClick) { this.suppressSeekClick = false; return; }
         if (!this.audioBuffer) return;
         this._seekToTime(this._clientXToTime(e.clientX, 'spectrogram'), false);
     }
 
     _handleWaveformClick(e) {
+        if (performance.now() < this._blockSeekClickUntil) return;
         if (this.suppressSeekClick) { this.suppressSeekClick = false; return; }
         if (!this.audioBuffer) return;
         this._seekToTime(this._clientXToTime(e.clientX, 'waveform'), false);
+    }
+
+    _blockSeekClicks(ms = 220) {
+        this._blockSeekClickUntil = Math.max(this._blockSeekClickUntil, performance.now() + ms);
+        this.suppressSeekClick = true;
     }
 
     _startPlayheadDrag(event, source) {
@@ -921,7 +1700,6 @@ export class PlayerState {
     _updateViewResize(clientY) {
         if (!this.viewResizeMode) return;
         const dy = clientY - this.viewResizeStartY;
-        const savedScroll = this.d.canvasWrapper.scrollLeft;
         let redrawWav = false;
 
         if (this.viewResizeMode === 'split') {
@@ -941,15 +1719,46 @@ export class PlayerState {
         this._applyLocalViewHeights();
         if (redrawWav) this._updateAmplitudeLabels();
         if (!this.audioBuffer) return;
-        if (redrawWav) this._drawMainWaveform();
-        if (this.spectrogramData && this.spectrogramFrames > 0) this._drawSpectrogram();
-        this._setLinkedScrollLeft(savedScroll);
+        this._queueResizeRedraw({
+            redrawWaveform: redrawWav,
+            redrawSpectrogram: this.spectrogramData && this.spectrogramFrames > 0,
+        });
     }
 
     _stopViewResize() {
         if (!this.viewResizeMode) return;
+        this._flushResizeRedraw(true);
         this.viewResizeMode = null;
         document.body.style.cursor = '';
+    }
+
+    _queueResizeRedraw({ redrawWaveform = false, redrawSpectrogram = false } = {}) {
+        this._viewResizeNeedsWaveformRedraw = this._viewResizeNeedsWaveformRedraw || redrawWaveform;
+        this._viewResizeNeedsSpectrogramRedraw = this._viewResizeNeedsSpectrogramRedraw || redrawSpectrogram;
+        if (this._viewResizeFrameId) return;
+        this._viewResizeFrameId = requestAnimationFrame(() => this._flushResizeRedraw(false));
+    }
+
+    _flushResizeRedraw(force) {
+        if (!this.audioBuffer) return;
+        if (this._viewResizeFrameId) {
+            cancelAnimationFrame(this._viewResizeFrameId);
+            this._viewResizeFrameId = 0;
+        }
+
+        const redrawWaveform = force || this._viewResizeNeedsWaveformRedraw;
+        const redrawSpectrogram = force || this._viewResizeNeedsSpectrogramRedraw;
+        this._viewResizeNeedsWaveformRedraw = false;
+        this._viewResizeNeedsSpectrogramRedraw = false;
+
+        const savedScroll = this.d.canvasWrapper.scrollLeft;
+        if (redrawWaveform) this._drawMainWaveform();
+        if (redrawSpectrogram) this._drawSpectrogram();
+        this._setLinkedScrollLeft(savedScroll);
+        this._emit('viewresize', {
+            waveformHeight: this.waveformDisplayHeight,
+            spectrogramHeight: this.spectrogramDisplayHeight,
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -1056,6 +1865,7 @@ export class PlayerState {
         on(this.d.fftSizeSelect, 'change', () => { if (this.audioBuffer) this._generateSpectrogram(); });
         on(this.d.maxFreqSelect, 'change', () => {
             if (this.audioBuffer && this.spectrogramData && this.spectrogramFrames > 0) {
+                this._emit('spectrogramscalechange', { maxFreq: parseFloat(this.d.maxFreqSelect.value) });
                 this._createFrequencyLabels();
                 this._buildSpectrogramGrayscale();  // maxFreq affects spatial layout
                 this._buildSpectrogramBaseImage();
@@ -1103,6 +1913,30 @@ export class PlayerState {
         });
         on(this.d.canvasWrapper, 'wheel', (e) => this._handleWheel(e, 'spectrogram'), { passive: false });
         on(this.d.waveformWrapper, 'wheel', (e) => this._handleWheel(e, 'waveform'), { passive: false });
+        on(this.d.canvasWrapper, 'keydown', (e) => {
+            if (!this.audioBuffer) return;
+            if (isTypingContext(e.target)) return;
+            switch (e.key) {
+                case 'ArrowLeft':
+                    e.preventDefault();
+                    this._seekByDelta(-SEEK_FINE_SEC);
+                    break;
+                case 'ArrowRight':
+                    e.preventDefault();
+                    this._seekByDelta(SEEK_FINE_SEC);
+                    break;
+                case 'Home':
+                    e.preventDefault();
+                    this._seekToTime(0, true);
+                    break;
+                case 'End':
+                    e.preventDefault();
+                    this._seekToTime(this.audioBuffer.duration, true);
+                    break;
+                default:
+                    break;
+            }
+        });
         on(this.d.canvasWrapper, 'pointerdown', (e) => this._startViewportPan(e, 'spectrogram'));
         on(this.d.waveformWrapper, 'pointerdown', (e) => this._startViewportPan(e, 'waveform'));
 
@@ -1156,7 +1990,42 @@ export class PlayerState {
             this._drawMainWaveform();
             this._drawOverviewWaveform();
             this._syncOverviewWindowToViewport();
+            this._emit('viewresize', {
+                waveformHeight: this.waveformDisplayHeight,
+                spectrogramHeight: this.spectrogramDisplayHeight,
+            });
         });
         on(window, 'beforeunload', () => this.dispose());
+    }
+
+    _bindTouchGestures() {
+        const bindRecognizer = (element, source) => {
+            if (!element) return;
+            const rec = new GestureRecognizer(element);
+            const offSwipe = rec.on('swipe', ({ dx }) => {
+                if (!this.audioBuffer) return;
+                this._seekRelative(dx / Math.max(1, this.pixelsPerSecond));
+            });
+            const offPinch = rec.on('pinch', ({ scale, centerX }) => {
+                if (!this.audioBuffer) return;
+                // Clamp very noisy scale deltas from touch sensors
+                const clampedScale = Math.max(0.85, Math.min(1.15, scale));
+                this._zoomByScale(clampedScale, centerX, source);
+            });
+            const offDoubleTap = rec.on('doubletap', () => {
+                if (!this.audioBuffer) return;
+                this._fitEntireTrackInView();
+            });
+
+            this._cleanups.push(() => {
+                offSwipe();
+                offPinch();
+                offDoubleTap();
+                rec.dispose();
+            });
+        };
+
+        bindRecognizer(this.d.waveformWrapper, 'waveform');
+        bindRecognizer(this.d.canvasWrapper, 'spectrogram');
     }
 }

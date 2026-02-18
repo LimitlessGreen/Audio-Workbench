@@ -5,6 +5,10 @@
 import { SPECTROGRAM_HEIGHT, MAX_BASE_SPECTROGRAM_WIDTH } from './constants.js';
 import { getTimeGridSteps } from './utils.js';
 
+const CACHE_DB_NAME = 'audio-workbench-player-cache';
+const CACHE_DB_VERSION = 1;
+const CACHE_STORE = 'spectrograms';
+
 // ─── Signal Utilities ───────────────────────────────────────────────
 
 export function computeAmplitudePeak(channelData) {
@@ -609,6 +613,92 @@ export function renderSpectrogram({
     drawTimeGrid({ ctx, width, height, duration, pixelsPerSecond });
 }
 
+// ─── IndexedDB cache helpers ───────────────────────────────────────
+
+function openSpectrogramCacheDb() {
+    return new Promise((resolve, reject) => {
+        if (typeof indexedDB === 'undefined') {
+            reject(new Error('indexedDB unavailable'));
+            return;
+        }
+        const req = indexedDB.open(CACHE_DB_NAME, CACHE_DB_VERSION);
+        req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(CACHE_STORE)) {
+                db.createObjectStore(CACHE_STORE, { keyPath: 'cacheKey' });
+            }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error || new Error('Failed to open cache DB'));
+    });
+}
+
+export async function sha256ArrayBuffer(arrayBuffer) {
+    if (!globalThis.crypto?.subtle) {
+        throw new Error('crypto.subtle unavailable');
+    }
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', arrayBuffer);
+    const bytes = new Uint8Array(digest);
+    let out = '';
+    for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, '0');
+    return out;
+}
+
+export function buildSpectrogramCacheKey({
+    fileHash,
+    fftSize,
+    sampleRate,
+    frameRate,
+    nMels,
+    pcenGain,
+    pcenBias,
+    pcenRoot,
+    pcenSmoothing,
+}) {
+    return [
+        fileHash,
+        `fft=${fftSize}`,
+        `sr=${sampleRate}`,
+        `fr=${frameRate}`,
+        `mels=${nMels}`,
+        `g=${pcenGain}`,
+        `b=${pcenBias}`,
+        `r=${pcenRoot}`,
+        `s=${pcenSmoothing}`,
+    ].join('|');
+}
+
+export async function getSpectrogramCacheEntry(cacheKey) {
+    try {
+        const db = await openSpectrogramCacheDb();
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction(CACHE_STORE, 'readonly');
+            const store = tx.objectStore(CACHE_STORE);
+            const req = store.get(cacheKey);
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => reject(req.error || new Error('Cache read failed'));
+        });
+    } catch {
+        return null;
+    }
+}
+
+export async function putSpectrogramCacheEntry(entry) {
+    try {
+        const db = await openSpectrogramCacheDb();
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction(CACHE_STORE, 'readwrite');
+            const store = tx.objectStore(CACHE_STORE);
+            store.put(entry);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('Cache write failed'));
+        });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 // ─── Worker-based Spectrogram Processor ─────────────────────────────
 
 const WORKER_CODE = `
@@ -992,10 +1082,33 @@ export function createSpectrogramProcessor() {
         }
     };
 
+    // ── Progressive compute for long recordings ────────────────────
+    // Yields per-chunk results and progress metadata.
+    const computeProgressive = async function* (channelData, options) {
+        const sampleRate = Math.max(1, options.sampleRate || 0);
+        const chunkSeconds = Math.max(1, options.chunkSeconds || 10);
+        const samplesPerChunk = Math.max(1, Math.floor(chunkSeconds * sampleRate));
+        const totalChunks = Math.max(1, Math.ceil(channelData.length / samplesPerChunk));
+
+        for (let chunk = 0; chunk < totalChunks; chunk++) {
+            const startSample = chunk * samplesPerChunk;
+            const endSample = Math.min(channelData.length, startSample + samplesPerChunk);
+            const chunkData = channelData.subarray(startSample, endSample);
+            const result = await compute(chunkData, options);
+
+            yield {
+                chunk,
+                totalChunks,
+                percent: ((chunk + 1) / totalChunks) * 100,
+                result,
+            };
+        }
+    };
+
     const dispose = () => {
         if (worker) { worker.terminate(); worker = null; }
         pendingRequests.clear();
     };
 
-    return { compute, dispose };
+    return { compute, computeProgressive, dispose };
 }
