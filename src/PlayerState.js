@@ -51,6 +51,12 @@ async function decodeArrayBuffer(arrayBuffer) {
     }
 }
 
+function clampNumber(value, min, max, fallback) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, n));
+}
+
 // ═════════════════════════════════════════════════════════════════════
 
 export class PlayerState {
@@ -63,6 +69,16 @@ export class PlayerState {
         this.WaveSurfer = WaveSurfer;
         this._emitHostEvent = typeof emitHostEvent === 'function' ? emitHostEvent : null;
         this.options = options || {};
+        this._viewMode = this.options.viewMode === 'waveform' || this.options.viewMode === 'spectrogram'
+            ? this.options.viewMode
+            : 'both';
+        this._showWaveform = this._viewMode !== 'spectrogram';
+        this._showSpectrogram = this._viewMode !== 'waveform';
+        this._showOverview = this.options.showOverview !== false;
+        this._transportOverlay = this.options.transportOverlay === true;
+        this._showWaveformTimeline = this.options.showWaveformTimeline !== false
+            && !(this.options.transportOverlay && this._viewMode === 'waveform');
+        this._playbackViewportConfig = this._sanitizePlaybackViewportConfig(this.options || {});
 
         this.processor = createSpectrogramProcessor();
         this.colorizer = new GpuColorizer();
@@ -94,6 +110,7 @@ export class PlayerState {
         this.windowEndNorm = 1;
 
         // ── Playback toggles ──
+        this.followMode = 'follow'; // 'free' | 'follow' | 'smooth'
         this.followPlayback = true;
         this.loopPlayback = false;
         this.playbackMode = 'normal'; // 'normal' | 'segment'
@@ -105,6 +122,7 @@ export class PlayerState {
         this._suppressNextPauseHandler = false;
         this._segmentPlayToken = 0;
         this._customSegmentPlayback = null;
+        this._smoothSeekFocusUntil = 0;
         this._lastTimeupdateEmitAt = 0;
         this._lastSelectionEmitAt = 0;
         this._lastSelectionStart = NaN;
@@ -114,6 +132,8 @@ export class PlayerState {
         this._lastTimeReadoutText = '';
         this._uiFrameId = 0;
         this._uiPending = null;
+        this._followCatchupRafId = 0;
+        this._followCatchupAnim = null;
         this._perf = {
             enabled: false,
             panel: null,
@@ -176,6 +196,36 @@ export class PlayerState {
     _emit(event, detail = {}) {
         if (!this._emitHostEvent) return;
         this._emitHostEvent(event, detail);
+    }
+
+    _sanitizePlaybackViewportConfig(partial = {}) {
+        const cfg = this._playbackViewportConfig || {};
+        return {
+            followGuardLeftRatio: clampNumber(partial.followGuardLeftRatio, 0.05, 0.95, cfg.followGuardLeftRatio ?? 0.35),
+            followGuardRightRatio: clampNumber(partial.followGuardRightRatio, 0.05, 0.95, cfg.followGuardRightRatio ?? 0.65),
+            followTargetRatio: clampNumber(partial.followTargetRatio, 0.1, 0.9, cfg.followTargetRatio ?? 0.5),
+            followCatchupDurationMs: clampNumber(partial.followCatchupDurationMs, 80, 2500, cfg.followCatchupDurationMs ?? 240),
+            followCatchupSeekDurationMs: clampNumber(partial.followCatchupSeekDurationMs, 100, 3000, cfg.followCatchupSeekDurationMs ?? 360),
+            smoothLerp: clampNumber(partial.smoothLerp, 0.02, 0.95, cfg.smoothLerp ?? 0.18),
+            smoothSeekLerp: clampNumber(partial.smoothSeekLerp, 0.01, 0.9, cfg.smoothSeekLerp ?? 0.08),
+            smoothMinStepRatio: clampNumber(partial.smoothMinStepRatio, 0.001, 0.25, cfg.smoothMinStepRatio ?? 0.03),
+            smoothSeekMinStepRatio: clampNumber(partial.smoothSeekMinStepRatio, 0.001, 0.2, cfg.smoothSeekMinStepRatio ?? 0.008),
+            smoothSeekFocusMs: clampNumber(partial.smoothSeekFocusMs, 150, 5000, cfg.smoothSeekFocusMs ?? 1400),
+        };
+    }
+
+    updatePlaybackViewportConfig(partial = {}) {
+        this._playbackViewportConfig = this._sanitizePlaybackViewportConfig(partial);
+        if (this._playbackViewportConfig.followGuardLeftRatio >= this._playbackViewportConfig.followGuardRightRatio) {
+            this._playbackViewportConfig.followGuardLeftRatio = 0.35;
+            this._playbackViewportConfig.followGuardRightRatio = 0.65;
+        }
+        this._emit('followconfigchange', { ...this._playbackViewportConfig });
+        return { ...this._playbackViewportConfig };
+    }
+
+    getPlaybackViewportConfig() {
+        return { ...this._playbackViewportConfig };
     }
 
     _initPerfOverlay() {
@@ -373,6 +423,7 @@ export class PlayerState {
 
     dispose() {
         this._stopCustomSegmentPlayback('stopped', this._getCurrentTime());
+        this._cancelFollowCatchupAnimation();
         if (this._viewResizeFrameId) {
             cancelAnimationFrame(this._viewResizeFrameId);
             this._viewResizeFrameId = 0;
@@ -913,6 +964,9 @@ export class PlayerState {
 
     _seekToTime(timeSec, centerView = false, options = {}) {
         if (!this.audioBuffer) return;
+        if (options.userInitiated) {
+            this._smoothSeekFocusUntil = performance.now() + this._playbackViewportConfig.smoothSeekFocusMs;
+        }
         if (this._customSegmentPlayback && options.allowCustomPlayback !== true) {
             this._stopCustomSegmentPlayback('paused', this._customSegmentPlayback.currentTimeSec);
         }
@@ -969,7 +1023,7 @@ export class PlayerState {
         if (!this.audioBuffer) return;
 
         const duration = Math.max(0.001, this.audioBuffer.duration);
-        const canvasWidth = this.d.spectrogramCanvas.width;
+        const canvasWidth = Math.max(1, this.d.spectrogramCanvas.width || this.d.amplitudeCanvas.width || 0);
         const position = (currentTime / duration) * canvasWidth;
 
         this.d.playhead.style.transform = `translateX(${position}px)`;
@@ -978,11 +1032,15 @@ export class PlayerState {
         // Follow-mode scroll
         if (fromPlayback && this.followPlayback && this.wavesurfer?.isPlaying()) {
             const vw = this._getViewportWidth();
-            const scrollLeft = this.d.canvasWrapper.scrollLeft;
-            const guardLeft = scrollLeft + vw * 0.35;
-            const guardRight = scrollLeft + vw * 0.65;
-            if (position < guardLeft || position > guardRight) {
-                this._setLinkedScrollLeft(Math.max(0, position - vw * 0.5));
+            if (this.followMode === 'smooth') {
+                this._applySmoothFollow(position, vw);
+            } else {
+                const scrollLeft = this.d.canvasWrapper.scrollLeft;
+                const guardLeft = scrollLeft + vw * this._playbackViewportConfig.followGuardLeftRatio;
+                const guardRight = scrollLeft + vw * this._playbackViewportConfig.followGuardRightRatio;
+                if (position < guardLeft || position > guardRight) {
+                    this._animateFollowCatchupTo(Math.max(0, position - vw * this._playbackViewportConfig.followTargetRatio));
+                }
             }
         }
 
@@ -1322,15 +1380,18 @@ export class PlayerState {
     }
 
     _drawSpectrogram() {
+        if (!this._showSpectrogram) return;
         if (!this.audioBuffer || !this.spectrogramData || this.spectrogramFrames <= 0) return;
         if (!this.spectrogramBaseCanvas) this._buildSpectrogramBaseImage();
         if (!this.spectrogramBaseCanvas) return;
+
+        const effectiveSpectrogramHeight = this._getEffectiveSpectrogramHeight();
 
         renderSpectrogram({
             duration: this.audioBuffer.duration,
             spectrogramCanvas: this.d.spectrogramCanvas,
             pixelsPerSecond: this.pixelsPerSecond,
-            canvasHeight: this.spectrogramDisplayHeight,
+            canvasHeight: effectiveSpectrogramHeight,
             baseCanvas: this.spectrogramBaseCanvas,
             sampleRate: this.audioBuffer.sampleRate,
             frameRate: PERCH_FRAME_RATE,
@@ -1354,19 +1415,23 @@ export class PlayerState {
     // ═════════════════════════════════════════════════════════════════
 
     _drawMainWaveform() {
+        if (!this._showWaveform) return;
+        const effectiveWaveformHeight = this._getEffectiveWaveformHeight();
         renderMainWaveform({
             audioBuffer: this.audioBuffer,
             amplitudeCanvas: this.d.amplitudeCanvas,
             waveformTimelineCanvas: this.d.waveformTimelineCanvas,
             waveformContent: this.d.waveformContent,
             pixelsPerSecond: this.pixelsPerSecond,
-            waveformHeight: this.waveformDisplayHeight,
+            waveformHeight: effectiveWaveformHeight,
             amplitudePeakAbs: this.amplitudePeakAbs,
+            showTimeline: this._showWaveformTimeline,
         });
         this._scheduleUiUpdate({ time: this._getCurrentTime(), fromPlayback: false, immediate: true });
     }
 
     _drawOverviewWaveform() {
+        if (!this._showOverview) return;
         renderOverviewWaveform({
             audioBuffer: this.audioBuffer,
             overviewCanvas: this.d.overviewCanvas,
@@ -1390,8 +1455,8 @@ export class PlayerState {
         el.innerHTML = '';
 
         const peak = Math.max(1e-6, this.amplitudePeakAbs || 1);
-        const clampedH = Math.max(MIN_WAVEFORM_HEIGHT, Math.floor(this.waveformDisplayHeight));
-        const timelineH = Math.max(18, Math.min(32, Math.round(clampedH * 0.22)));
+        const clampedH = this._getEffectiveWaveformHeight();
+        const timelineH = this._showWaveformTimeline ? Math.max(18, Math.min(32, Math.round(clampedH * 0.22))) : 0;
         const ampH = Math.max(32, clampedH - timelineH);
 
         const fmt = (v) => {
@@ -1508,7 +1573,13 @@ export class PlayerState {
     // ═════════════════════════════════════════════════════════════════
 
     _syncOverviewWindowToViewport() {
-        if (!this.audioBuffer || this.d.spectrogramCanvas.width <= 0) return;
+        if (!this._showOverview || !this.audioBuffer) return;
+        const trackWidth = Math.max(
+            this.d.spectrogramCanvas.width || 0,
+            this.d.amplitudeCanvas.width || 0,
+            Math.floor(this.audioBuffer.duration * this.pixelsPerSecond),
+        );
+        if (trackWidth <= 0) return;
 
         const vw = this._getViewportWidth();
         const viewTime = vw / this.pixelsPerSecond;
@@ -1546,6 +1617,7 @@ export class PlayerState {
     }
 
     _updateOverviewWindowElement() {
+        if (!this._showOverview) return;
         const cw = this.d.overviewContainer.clientWidth;
         const left = this.windowStartNorm * cw;
         const width = Math.max(8, this.windowEndNorm * cw - left);
@@ -1561,7 +1633,7 @@ export class PlayerState {
     }
 
     _updateOverviewDrag(clientX) {
-        if (!this.audioBuffer || !this.overviewMode) return;
+        if (!this._showOverview || !this.audioBuffer || !this.overviewMode) return;
 
         const cw = this.d.overviewContainer.clientWidth;
         const deltaNorm = (clientX - this.overviewDragStartX) / cw;
@@ -1591,7 +1663,7 @@ export class PlayerState {
     }
 
     _applyOverviewWindowToViewport() {
-        if (!this.audioBuffer) return;
+        if (!this._showOverview || !this.audioBuffer) return;
         const dur = this.audioBuffer.duration;
         const viewDur = Math.max(0.01, (this.windowEndNorm - this.windowStartNorm) * dur);
         const targetPps = this._getViewportWidth() / viewDur;
@@ -1606,14 +1678,16 @@ export class PlayerState {
         if (performance.now() < this._blockSeekClickUntil) return;
         if (this.suppressSeekClick) { this.suppressSeekClick = false; return; }
         if (!this.audioBuffer) return;
-        this._seekToTime(this._clientXToTime(e.clientX, 'spectrogram'), false);
+        this._cancelFollowCatchupAnimation();
+        this._seekToTime(this._clientXToTime(e.clientX, 'spectrogram'), false, { userInitiated: true });
     }
 
     _handleWaveformClick(e) {
         if (performance.now() < this._blockSeekClickUntil) return;
         if (this.suppressSeekClick) { this.suppressSeekClick = false; return; }
         if (!this.audioBuffer) return;
-        this._seekToTime(this._clientXToTime(e.clientX, 'waveform'), false);
+        this._cancelFollowCatchupAnimation();
+        this._seekToTime(this._clientXToTime(e.clientX, 'waveform'), false, { userInitiated: true });
     }
 
     _blockSeekClicks(ms = 220) {
@@ -1636,6 +1710,7 @@ export class PlayerState {
 
     _startViewportPan(event, source) {
         if (!this.audioBuffer) return;
+        this._cancelFollowCatchupAnimation();
         if (event.target === this.d.playhead || event.target === this.d.waveformPlayhead) return;
         if (event.button !== 0 && event.button !== 1) return;
         if (event.button === 1) event.preventDefault();
@@ -1661,6 +1736,7 @@ export class PlayerState {
 
     _handleWheel(event, source) {
         if (!this.audioBuffer) return;
+        this._cancelFollowCatchupAnimation();
 
         const wrapper = source === 'waveform' ? this.d.waveformWrapper : this.d.canvasWrapper;
         const rect = wrapper.getBoundingClientRect();
@@ -1685,8 +1761,39 @@ export class PlayerState {
     // ═════════════════════════════════════════════════════════════════
 
     _applyLocalViewHeights() {
-        this.d.waveformContainer.style.height = `${Math.round(this.waveformDisplayHeight)}px`;
-        this.d.spectrogramContainer.style.height = `${Math.round(this.spectrogramDisplayHeight)}px`;
+        const overlaySingleWaveform = this._transportOverlay && this._showWaveform && !this._showSpectrogram;
+        const overlaySingleSpectrogram = this._transportOverlay && this._showSpectrogram && !this._showWaveform;
+
+        if (this._showWaveform) {
+            if (overlaySingleWaveform) {
+                this.d.waveformContainer.style.height = 'auto';
+            } else {
+            this.d.waveformContainer.style.height = `${Math.round(this.waveformDisplayHeight)}px`;
+            }
+        }
+        if (this._showSpectrogram) {
+            if (overlaySingleSpectrogram) {
+                this.d.spectrogramContainer.style.height = 'auto';
+            } else {
+            this.d.spectrogramContainer.style.height = `${Math.round(this.spectrogramDisplayHeight)}px`;
+            }
+        }
+    }
+
+    _getEffectiveWaveformHeight() {
+        if (this._transportOverlay && this._showWaveform && !this._showSpectrogram) {
+            const h = this.d.waveformContainer?.clientHeight || 0;
+            return Math.max(MIN_WAVEFORM_HEIGHT, Math.floor(h || this.waveformDisplayHeight));
+        }
+        return Math.max(MIN_WAVEFORM_HEIGHT, Math.floor(this.waveformDisplayHeight));
+    }
+
+    _getEffectiveSpectrogramHeight() {
+        if (this._transportOverlay && this._showSpectrogram && !this._showWaveform) {
+            const h = this.d.spectrogramContainer?.clientHeight || 0;
+            return Math.max(MIN_SPECTROGRAM_DISPLAY_HEIGHT, Math.floor(h || this.spectrogramDisplayHeight));
+        }
+        return Math.max(MIN_SPECTROGRAM_DISPLAY_HEIGHT, Math.floor(this.spectrogramDisplayHeight));
     }
 
     _startViewResize(mode, clientY) {
@@ -1699,6 +1806,8 @@ export class PlayerState {
 
     _updateViewResize(clientY) {
         if (!this.viewResizeMode) return;
+        if ((this.viewResizeMode === 'split' && (!this._showWaveform || !this._showSpectrogram))
+            || (this.viewResizeMode === 'spectrogram' && !this._showSpectrogram)) return;
         const dy = clientY - this.viewResizeStartY;
         let redrawWav = false;
 
@@ -1781,10 +1890,95 @@ export class PlayerState {
     }
 
     _updateToggleButtons() {
-        this.d.followToggleBtn.classList.toggle('active', this.followPlayback);
-        this.d.loopToggleBtn.classList.toggle('active', this.loopPlayback);
-        this.d.followToggleBtn.textContent = this.followPlayback ? 'Follow' : 'Free';
-        this.d.loopToggleBtn.textContent = this.loopPlayback ? 'Loop On' : 'Loop';
+        this.followPlayback = this.followMode !== 'free';
+        if (this.d.followToggleBtn) {
+            this.d.followToggleBtn.classList.toggle('active', this.followPlayback);
+            this.d.followToggleBtn.textContent = this.followMode === 'smooth'
+                ? 'Smooth'
+                : (this.followPlayback ? 'Follow' : 'Free');
+            this.d.followToggleBtn.title = this.followMode === 'smooth'
+                ? 'Smooth follow (continuous)'
+                : (this.followPlayback ? 'Follow playhead' : 'Free navigation');
+        }
+        if (this.d.loopToggleBtn) {
+            this.d.loopToggleBtn.classList.toggle('active', this.loopPlayback);
+            this.d.loopToggleBtn.textContent = this.loopPlayback ? 'Loop On' : 'Loop';
+        }
+    }
+
+    _cycleFollowMode() {
+        this.followMode = this.followMode === 'free'
+            ? 'follow'
+            : this.followMode === 'follow'
+                ? 'smooth'
+                : 'free';
+        if (this.followMode !== 'follow') this._cancelFollowCatchupAnimation();
+        this._updateToggleButtons();
+        this._emit('followmodechange', { mode: this.followMode });
+    }
+
+    _cancelFollowCatchupAnimation() {
+        if (this._followCatchupRafId) {
+            cancelAnimationFrame(this._followCatchupRafId);
+            this._followCatchupRafId = 0;
+        }
+        this._followCatchupAnim = null;
+    }
+
+    _animateFollowCatchupTo(targetScrollLeft) {
+        if (!this.audioBuffer) return;
+        const vw = this._getViewportWidth();
+        const tw = Math.max(1, Math.floor(this.audioBuffer.duration * this.pixelsPerSecond));
+        const maxScroll = Math.max(0, tw - vw);
+        const target = Math.max(0, Math.min(maxScroll, targetScrollLeft));
+        const start = this.d.canvasWrapper.scrollLeft;
+        const delta = target - start;
+        if (Math.abs(delta) < 1) return;
+
+        const now = performance.now();
+        const inSeekFocus = now < this._smoothSeekFocusUntil;
+        const duration = inSeekFocus
+            ? this._playbackViewportConfig.followCatchupSeekDurationMs
+            : this._playbackViewportConfig.followCatchupDurationMs;
+
+        if (this._followCatchupAnim) {
+            const pending = this._followCatchupAnim.target;
+            if (Math.abs(pending - target) < 6) return;
+        }
+
+        this._cancelFollowCatchupAnimation();
+        this._followCatchupAnim = { start, target, startedAt: now, duration };
+        const easeOutCubic = (t) => 1 - ((1 - t) ** 3);
+
+        const tick = (ts) => {
+            const anim = this._followCatchupAnim;
+            if (!anim) return;
+            const t = Math.max(0, Math.min(1, (ts - anim.startedAt) / Math.max(1, anim.duration)));
+            const eased = easeOutCubic(t);
+            const next = anim.start + (anim.target - anim.start) * eased;
+            this._setLinkedScrollLeft(next);
+            if (t >= 1) {
+                this._cancelFollowCatchupAnimation();
+                return;
+            }
+            this._followCatchupRafId = requestAnimationFrame(tick);
+        };
+        this._followCatchupRafId = requestAnimationFrame(tick);
+    }
+
+    _applySmoothFollow(position, viewportWidth) {
+        const vw = Math.max(1, viewportWidth || this._getViewportWidth());
+        const totalWidth = this.audioBuffer ? Math.max(1, Math.floor(this.audioBuffer.duration * this.pixelsPerSecond)) : 0;
+        const maxScroll = Math.max(0, totalWidth - vw);
+        const target = Math.max(0, Math.min(maxScroll, position - vw * this._playbackViewportConfig.followTargetRatio));
+        const current = this.d.canvasWrapper.scrollLeft;
+        const delta = target - current;
+        if (Math.abs(delta) < 0.6) return;
+        const inSeekFocus = performance.now() < this._smoothSeekFocusUntil;
+        const lerp = inSeekFocus ? this._playbackViewportConfig.smoothSeekLerp : this._playbackViewportConfig.smoothLerp;
+        const minStep = inSeekFocus ? vw * this._playbackViewportConfig.smoothSeekMinStepRatio : vw * this._playbackViewportConfig.smoothMinStepRatio;
+        const step = Math.sign(delta) * Math.min(Math.abs(delta), Math.max(minStep, Math.abs(delta) * lerp, 1));
+        this._setLinkedScrollLeft(current + step);
     }
 
     _setInitialPlayheadPositions() {
@@ -1852,7 +2046,7 @@ export class PlayerState {
         on(this.d.jumpEndBtn, 'click', () => this._seekToTime(this.audioBuffer?.duration ?? 0, true));
         on(this.d.backwardBtn, 'click', () => this._seekByDelta(-SEEK_COARSE_SEC));
         on(this.d.forwardBtn, 'click', () => this._seekByDelta(SEEK_COARSE_SEC));
-        on(this.d.followToggleBtn, 'click', () => { this.followPlayback = !this.followPlayback; this._updateToggleButtons(); });
+        on(this.d.followToggleBtn, 'click', () => this._cycleFollowMode());
         on(this.d.loopToggleBtn, 'click', () => { this.loopPlayback = !this.loopPlayback; this._updateToggleButtons(); });
         on(this.d.fitViewBtn, 'click', () => this._fitEntireTrackInView());
         on(this.d.resetViewBtn, 'click', () => {
@@ -1945,8 +2139,16 @@ export class PlayerState {
         on(this.d.waveformPlayhead, 'pointerdown', (e) => this._startPlayheadDrag(e, 'waveform'));
 
         // ── View resize ──
-        on(this.d.viewSplitHandle, 'pointerdown', (e) => { e.preventDefault(); this._startViewResize('split', e.clientY); });
-        on(this.d.spectrogramResizeHandle, 'pointerdown', (e) => { e.preventDefault(); this._startViewResize('spectrogram', e.clientY); });
+        on(this.d.viewSplitHandle, 'pointerdown', (e) => {
+            if (!this._showWaveform || !this._showSpectrogram) return;
+            e.preventDefault();
+            this._startViewResize('split', e.clientY);
+        });
+        on(this.d.spectrogramResizeHandle, 'pointerdown', (e) => {
+            if (!this._showSpectrogram) return;
+            e.preventDefault();
+            this._startViewResize('spectrogram', e.clientY);
+        });
 
         // ── Document-level pointer ──
         on(document, 'pointermove', (e) => {
@@ -1970,14 +2172,24 @@ export class PlayerState {
         on(document, 'keydown', (e) => this._handleKeyboardShortcuts(e));
 
         // ── Overview ──
-        on(this.d.overviewHandleLeft, 'pointerdown', (e) => { e.preventDefault(); this._startOverviewDrag('left', e.clientX); });
-        on(this.d.overviewHandleRight, 'pointerdown', (e) => { e.preventDefault(); this._startOverviewDrag('right', e.clientX); });
+        on(this.d.overviewHandleLeft, 'pointerdown', (e) => {
+            if (!this._showOverview) return;
+            e.preventDefault();
+            this._startOverviewDrag('left', e.clientX);
+        });
+        on(this.d.overviewHandleRight, 'pointerdown', (e) => {
+            if (!this._showOverview) return;
+            e.preventDefault();
+            this._startOverviewDrag('right', e.clientX);
+        });
         on(this.d.overviewWindow, 'pointerdown', (e) => {
+            if (!this._showOverview) return;
             if (e.target === this.d.overviewHandleLeft || e.target === this.d.overviewHandleRight) return;
             e.preventDefault();
             this._startOverviewDrag('move', e.clientX);
         });
         on(this.d.overviewCanvas, 'click', (e) => {
+            if (!this._showOverview) return;
             if (!this.audioBuffer) return;
             const rect = this.d.overviewCanvas.getBoundingClientRect();
             const xNorm = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));

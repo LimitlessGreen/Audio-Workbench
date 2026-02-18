@@ -151,6 +151,12 @@ player.pause(): void
 player.stop(): void
 player.togglePlayPause(): void
 player.playBandpassedSegment(startSec: number, endSec: number, freqMinHz: number, freqMaxHz: number): void
+player.renameLabel(id: string, name: string): boolean
+player.getLabelTaxonomy(): Array<{ name: string; color?: string; shortcut?: string }>
+player.setLabelTaxonomy(items: Array<{ name: string; color?: string; shortcut?: string }>): void
+player.applyTaxonomyToLabel(id: string, shortcutOrIndex: string | number): boolean
+player.getPlaybackViewportConfig(): object
+player.setPlaybackViewportConfig(config: object): object
 player.destroy(): void
 ```
 
@@ -162,6 +168,50 @@ Aktiviere das Laufzeit-Overlay mit:
 - oder Option: `new BirdNETPlayer(el, { enablePerfOverlay: true })`
 
 Das Overlay zeigt u. a. FPS, Long-Frames, Eventraten und Transport-State-Transitions.
+
+## Label Editing
+
+- Doppelklick auf ein Label öffnet einen Inline-Editor.
+- Vorschläge basieren auf bereits verwendeten Label-Namen (wiederverwendbare Label-Library).
+- Farbe ist im Inline-Editor direkt per Color-Picker editierbar.
+- `Enter` speichert, `Esc` verwirft.
+- Taxonomy-Presets mit `1..9` sind unterstützt:
+  erst Label fokussieren (anklicken), dann Shortcut drücken.
+
+## Follow Modes
+
+- Follow-Button schaltet zyklisch: `Free` → `Follow` → `Smooth`.
+- `Smooth` fährt kontinuierlich mit, statt in Sprüngen zu zentrieren.
+- Follow/Smooth Verhalten ist konfigurierbar (Constructor + Runtime):
+
+```js
+const player = new BirdNETPlayer(el, {
+  followCatchupDurationMs: 280,
+  followCatchupSeekDurationMs: 420,
+  smoothLerp: 0.16,
+  smoothSeekLerp: 0.07
+})
+
+player.setPlaybackViewportConfig({ smoothSeekFocusMs: 1700 })
+```
+
+## Compact Preview Modes
+
+Für kleine Embeds kannst du den DAW-Look auf ein Vorschaufenster reduzieren:
+
+```js
+const player = new BirdNETPlayer(el, {
+  viewMode: 'spectrogram', // 'both' | 'waveform' | 'spectrogram'
+  transportStyle: 'hero',  // großer Play-Button
+  transportOverlay: true,  // zentriert, ohne Toolbar-Höhe
+  showWaveformTimeline: false,
+  showOverview: false,
+  showFileOpen: false,
+  showStatusbar: false,
+  showTime: false,
+  showVolume: false
+})
+```
 
 ## Tests
 

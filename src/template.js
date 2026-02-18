@@ -16,6 +16,21 @@ export const DEFAULT_OPTIONS = {
     showFFTControls:    true,   // FFT size, Freq, AF, Color
     showDisplayGain:    true,   // Floor / Ceil / AC sliders
     showStatusbar:      true,   // Bottom status bar
+    showOverview:       true,   // Bottom overview navigator
+    viewMode:           'both', // both | waveform | spectrogram
+    transportStyle:     'default', // default | hero
+    transportOverlay:   false,  // Overlay mode: centered play button without toolbar height
+    showWaveformTimeline: true, // Draw bottom timeline row in waveform view
+    followGuardLeftRatio: 0.35,       // Follow mode lower guard (0..1)
+    followGuardRightRatio: 0.65,      // Follow mode upper guard (0..1)
+    followTargetRatio: 0.5,           // Viewport target position for catchup
+    followCatchupDurationMs: 240,     // Follow catchup animation duration
+    followCatchupSeekDurationMs: 360, // Follow catchup duration after manual seek
+    smoothLerp: 0.18,                 // Smooth mode interpolation factor
+    smoothSeekLerp: 0.08,             // Smooth mode interpolation after manual seek
+    smoothMinStepRatio: 0.03,         // Smooth mode minimum step ratio
+    smoothSeekMinStepRatio: 0.008,    // Smooth mode minimum step ratio after seek
+    smoothSeekFocusMs: 1400,          // Slow-follow focus window after manual seek
 };
 
 /**
@@ -24,8 +39,16 @@ export const DEFAULT_OPTIONS = {
 export function createPlayerHTML(opts = {}) {
     const o = { ...DEFAULT_OPTIONS, ...opts };
     const hide = (flag) => flag ? '' : ' style="display:none"';
+    const viewMode = ['both', 'waveform', 'spectrogram'].includes(o.viewMode) ? o.viewMode : 'both';
+    const transportStyle = o.transportStyle === 'hero' ? 'hero' : 'default';
+    const shellClass = [
+        'daw-shell',
+        `view-mode-${viewMode}`,
+        `transport-style-${transportStyle}`,
+        o.transportOverlay ? 'transport-overlay' : '',
+    ].join(' ');
 
-    return `<div class="daw-shell">
+    return `<div class="${shellClass}">
 
     <!-- ═══ Top Toolbar ═══ -->
     <div class="toolbar">
@@ -79,7 +102,7 @@ export function createPlayerHTML(opts = {}) {
 
         <!-- Toggle tools -->
         <span${hide(o.showViewToggles)}>
-            <button class="toolbar-btn toggle-btn active" id="followToggleBtn" disabled title="Playhead folgen">Follow</button>
+            <button class="toolbar-btn toggle-btn active" id="followToggleBtn" disabled title="Free / Follow / Smooth umschalten">Follow</button>
             <button class="toolbar-btn toggle-btn" id="loopToggleBtn" disabled title="Loop">Loop</button>
             <button class="toolbar-btn" id="fitViewBtn" disabled title="Fit to view">Fit</button>
             <button class="toolbar-btn" id="resetViewBtn" disabled title="Reset zoom">Reset</button>
@@ -187,7 +210,7 @@ export function createPlayerHTML(opts = {}) {
         </div>
 
         <!-- Overview -->
-        <div class="overview-container" id="overviewContainer">
+        <div class="overview-container" id="overviewContainer"${hide(o.showOverview)}>
             <canvas id="overviewCanvas"></canvas>
             <div class="overview-window" id="overviewWindow">
                 <div class="handle left" id="overviewHandleLeft"></div>

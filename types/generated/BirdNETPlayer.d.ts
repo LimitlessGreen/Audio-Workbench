@@ -13,6 +13,21 @@ export class BirdNETPlayer {
      * @param {boolean}     [options.showFFTControls] — show FFT/Freq/Color selects (default: true)
      * @param {boolean}     [options.showDisplayGain] — show Floor/Ceil sliders (default: true)
      * @param {boolean}     [options.showStatusbar]   — show bottom status bar (default: true)
+     * @param {boolean}     [options.showOverview]    — show overview navigator (default: true)
+     * @param {'both'|'waveform'|'spectrogram'} [options.viewMode] — visible analysis view(s) (default: both)
+     * @param {'default'|'hero'} [options.transportStyle] — transport button style (default: default)
+     * @param {boolean}     [options.transportOverlay] — centered play overlay without toolbar height (default: false)
+     * @param {boolean}     [options.showWaveformTimeline] — show bottom waveform timeline (default: true)
+     * @param {number}      [options.followGuardLeftRatio] — left follow guard ratio (default: 0.35)
+     * @param {number}      [options.followGuardRightRatio] — right follow guard ratio (default: 0.65)
+     * @param {number}      [options.followTargetRatio] — target ratio for viewport centering (default: 0.5)
+     * @param {number}      [options.followCatchupDurationMs] — follow catchup tween duration (default: 240)
+     * @param {number}      [options.followCatchupSeekDurationMs] — slower follow tween after manual seek (default: 360)
+     * @param {number}      [options.smoothLerp] — smooth mode lerp factor (default: 0.18)
+     * @param {number}      [options.smoothSeekLerp] — smooth mode lerp after manual seek (default: 0.08)
+     * @param {number}      [options.smoothMinStepRatio] — smooth min step ratio (default: 0.03)
+     * @param {number}      [options.smoothSeekMinStepRatio] — smooth min step ratio after seek (default: 0.008)
+     * @param {number}      [options.smoothSeekFocusMs] — slow-follow window after manual seek (default: 1400)
      */
     constructor(container: HTMLElement, options?: {
         WaveSurfer?: any;
@@ -25,6 +40,21 @@ export class BirdNETPlayer {
         showFFTControls?: boolean;
         showDisplayGain?: boolean;
         showStatusbar?: boolean;
+        showOverview?: boolean;
+        viewMode?: "both" | "waveform" | "spectrogram";
+        transportStyle?: "default" | "hero";
+        transportOverlay?: boolean;
+        showWaveformTimeline?: boolean;
+        followGuardLeftRatio?: number;
+        followGuardRightRatio?: number;
+        followTargetRatio?: number;
+        followCatchupDurationMs?: number;
+        followCatchupSeekDurationMs?: number;
+        smoothLerp?: number;
+        smoothSeekLerp?: number;
+        smoothMinStepRatio?: number;
+        smoothSeekMinStepRatio?: number;
+        smoothSeekFocusMs?: number;
     });
     container: HTMLElement;
     options: {
@@ -38,6 +68,21 @@ export class BirdNETPlayer {
         showFFTControls?: boolean;
         showDisplayGain?: boolean;
         showStatusbar?: boolean;
+        showOverview?: boolean;
+        viewMode?: "both" | "waveform" | "spectrogram";
+        transportStyle?: "default" | "hero";
+        transportOverlay?: boolean;
+        showWaveformTimeline?: boolean;
+        followGuardLeftRatio?: number;
+        followGuardRightRatio?: number;
+        followTargetRatio?: number;
+        followCatchupDurationMs?: number;
+        followCatchupSeekDurationMs?: number;
+        smoothLerp?: number;
+        smoothSeekLerp?: number;
+        smoothMinStepRatio?: number;
+        smoothSeekMinStepRatio?: number;
+        smoothSeekFocusMs?: number;
     };
     _state: PlayerState;
     _events: EventTarget;
@@ -45,6 +90,14 @@ export class BirdNETPlayer {
     spectrogramLabels: SpectrogramLabelLayer;
     _linkedLabels: Map<any, any>;
     _isSyncingLabels: boolean;
+    _labelLibrary: Map<any, any>;
+    _labelTaxonomy: {
+        name: string;
+        color: string;
+        shortcut: string;
+    }[];
+    _activeLabelId: string;
+    _globalKeyHandler: (event: any) => void;
     on: (event: any, callback: any, options: any) => () => void;
     off: (event: any, callback: any, options: any) => void;
     ready: Promise<this>;
@@ -72,12 +125,32 @@ export class BirdNETPlayer {
     addSpectrogramLabel(label: any): any;
     setSpectrogramLabels(labels: any): void;
     clearSpectrogramLabels(): void;
+    renameLabel(id: any, name: any): boolean;
+    getLabelSuggestions(prefix?: string, limit?: number): any[];
+    getLabelTaxonomy(): {
+        name: string;
+        color: string;
+        shortcut: string;
+    }[];
+    setLabelTaxonomy(taxonomy?: any[]): void;
+    applyTaxonomyToLabel(id: any, shortcutOrIndex: any): boolean;
+    setPlaybackViewportConfig(config?: {}): any;
+    getPlaybackViewportConfig(): any;
     /** Tear down the player and free resources */
     destroy(): void;
     _bindLinkedLabelSync(): void;
+    _bindGlobalHotkeys(): void;
+    _previewFromAnnotationEvent(annotation: any): void;
+    _previewFromSpectrogramEvent(label: any): void;
     _upsertFromAnnotationEvent(annotation: any): void;
     _upsertFromSpectrogramEvent(label: any): void;
     _syncLinkedLabelsToLayers(): void;
+    _rebuildLabelLibrary(): void;
+    _normalizeTaxonomy(taxonomy: any): {
+        name: string;
+        color: string;
+        shortcut: string;
+    }[];
     _toAnnotationList(): {
         id: any;
         start: any;

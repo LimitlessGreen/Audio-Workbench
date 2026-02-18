@@ -57,6 +57,13 @@ export class PlayerState {
     WaveSurfer: any;
     _emitHostEvent: any;
     options: {};
+    _viewMode: any;
+    _showWaveform: boolean;
+    _showSpectrogram: boolean;
+    _showOverview: boolean;
+    _transportOverlay: boolean;
+    _showWaveformTimeline: boolean;
+    _playbackViewportConfig: any;
     processor: {
         compute: (channelData: any, options: any) => Promise<any>;
         computeProgressive: (channelData: any, options: any) => AsyncGenerator<{
@@ -98,6 +105,7 @@ export class PlayerState {
     scrollSyncLock: boolean;
     windowStartNorm: number;
     windowEndNorm: number;
+    followMode: string;
     followPlayback: boolean;
     loopPlayback: boolean;
     playbackMode: string;
@@ -130,6 +138,7 @@ export class PlayerState {
         rafId: number;
         currentTimeSec: number;
     };
+    _smoothSeekFocusUntil: number;
     _lastTimeupdateEmitAt: number;
     _lastSelectionEmitAt: number;
     _lastSelectionStart: number;
@@ -139,6 +148,13 @@ export class PlayerState {
     _lastTimeReadoutText: string;
     _uiFrameId: number;
     _uiPending: any;
+    _followCatchupRafId: number;
+    _followCatchupAnim: {
+        start: any;
+        target: number;
+        startedAt: number;
+        duration: any;
+    };
     _perf: {
         enabled: boolean;
         panel: any;
@@ -173,8 +189,14 @@ export class PlayerState {
     viewResizeStartY: number;
     viewResizeStartWaveformHeight: number;
     viewResizeStartSpectrogramHeight: number;
+    _viewResizeFrameId: number;
+    _viewResizeNeedsWaveformRedraw: boolean;
+    _viewResizeNeedsSpectrogramRedraw: boolean;
     _cleanups: any[];
     _emit(event: any, detail?: {}): void;
+    _sanitizePlaybackViewportConfig(partial?: {}): any;
+    updatePlaybackViewportConfig(partial?: {}): any;
+    getPlaybackViewportConfig(): any;
     _initPerfOverlay(): void;
     _perfOnFrame(ts: any): void;
     _renderPerfOverlay(): void;
@@ -314,12 +336,23 @@ export class PlayerState {
     _updateViewportPan(clientX: any): void;
     _handleWheel(event: any, source: any): void;
     _applyLocalViewHeights(): void;
+    _getEffectiveWaveformHeight(): number;
+    _getEffectiveSpectrogramHeight(): number;
     _startViewResize(mode: any, clientY: any): void;
     _updateViewResize(clientY: any): void;
     _stopViewResize(): void;
+    _queueResizeRedraw({ redrawWaveform, redrawSpectrogram }?: {
+        redrawWaveform?: boolean;
+        redrawSpectrogram?: boolean;
+    }): void;
+    _flushResizeRedraw(force: any): void;
     _setPlayState(text: any): void;
     _setTransportEnabled(enabled: any): void;
     _updateToggleButtons(): void;
+    _cycleFollowMode(): void;
+    _cancelFollowCatchupAnimation(): void;
+    _animateFollowCatchupTo(targetScrollLeft: any): void;
+    _applySmoothFollow(position: any, viewportWidth: any): void;
     _setInitialPlayheadPositions(): void;
     _handleKeyboardShortcuts(event: any): void;
     _bindEvents(): void;

@@ -11,6 +11,7 @@ export class AnnotationLayer {
     player: any;
     overlay: HTMLDivElement;
     annotations: any[];
+    _liveLinkedId: any;
     _unsubs: any[];
     _domCleanups: any[];
     _editing: {
@@ -31,6 +32,7 @@ export class AnnotationLayer {
     clear(): void;
     remove(id: any): void;
     getAll(): any[];
+    setLiveLinkedId(id?: any): void;
     highlightActiveRegion(currentTime: any): void;
     exportRavenFormat(regions?: any[]): string;
     render(): void;
@@ -39,13 +41,14 @@ export class AnnotationLayer {
     _startEditInteraction(id: any, mode: any, clientX: any, element: any): void;
     _updateEditInteraction(clientX: any): void;
     _finishEditInteraction(): void;
+    _renameRegionPrompt(id: any): void;
     _normalize(annotation: any): {
         id: any;
         start: number;
         end: number;
         species: any;
         confidence: any;
-        color: any;
+        color: string;
     };
 }
 /**
@@ -62,6 +65,7 @@ export class SpectrogramLabelLayer {
     player: any;
     overlay: HTMLDivElement;
     labels: any[];
+    _liveLinkedId: any;
     _unsubs: any[];
     _domCleanups: any[];
     _draftEl: HTMLDivElement;
@@ -91,6 +95,7 @@ export class SpectrogramLabelLayer {
     clear(): void;
     remove(id: any): void;
     getAll(): any[];
+    setLiveLinkedId(id?: any): void;
     highlightActiveLabel(currentTime: any): void;
     render(): void;
     _createLabelElement(label: any, canvasWidth: any, canvasHeight: any): HTMLDivElement;
@@ -111,12 +116,13 @@ export class SpectrogramLabelLayer {
         freqMin: number;
         freqMax: number;
         label: any;
-        color: any;
+        color: string;
     };
     _clearDraft(): void;
     _startEditInteraction(labelId: any, mode: any, clientX: any, clientY: any, element: any): void;
     _updateEditInteraction(clientX: any, clientY: any): void;
     _finishEditInteraction(): void;
+    _renameSpectrogramLabelPrompt(id: any): void;
     _clientXToTime(clientX: any): any;
     _clientYToFreq(clientY: any): number;
     _getMaxFreq(): number;
@@ -127,7 +133,7 @@ export class SpectrogramLabelLayer {
         freqMin: number;
         freqMax: number;
         label: any;
-        color: any;
+        color: string;
     };
 }
 export type AnnotationRegion = {

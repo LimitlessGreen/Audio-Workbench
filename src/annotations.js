@@ -6,6 +6,168 @@ function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
 
+const _colorCtx = (() => {
+    try {
+        const canvas = document.createElement('canvas');
+        return canvas.getContext('2d');
+    } catch {
+        return null;
+    }
+})();
+
+function _parseColorToRgb(color) {
+    const raw = String(color || '').trim();
+    if (!raw || !_colorCtx) return null;
+    try {
+        _colorCtx.fillStyle = '#000000';
+        _colorCtx.fillStyle = raw;
+        const normalized = _colorCtx.fillStyle;
+        if (!normalized) return null;
+        if (normalized.startsWith('#')) {
+            const hex = normalized.slice(1);
+            if (hex.length === 3) {
+                return {
+                    r: parseInt(hex[0] + hex[0], 16),
+                    g: parseInt(hex[1] + hex[1], 16),
+                    b: parseInt(hex[2] + hex[2], 16),
+                };
+            }
+            if (hex.length === 6) {
+                return {
+                    r: parseInt(hex.slice(0, 2), 16),
+                    g: parseInt(hex.slice(2, 4), 16),
+                    b: parseInt(hex.slice(4, 6), 16),
+                };
+            }
+        }
+        const m = normalized.match(/rgba?\(([^)]+)\)/i);
+        if (!m) return null;
+        const parts = m[1].split(',').map((x) => Number(x.trim()));
+        if (parts.length < 3 || parts.some((n, i) => i < 3 && !Number.isFinite(n))) return null;
+        return { r: parts[0], g: parts[1], b: parts[2] };
+    } catch {
+        return null;
+    }
+}
+
+function _rgbToHex({ r, g, b }) {
+    const toHex = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0');
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function getOverlayColorStyle(color) {
+    const rgb = _parseColorToRgb(color);
+    if (!rgb) return null;
+    return {
+        fill: `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.22)`,
+        edge: `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.95)`,
+        soft: `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.55)`,
+        hex: _rgbToHex(rgb),
+    };
+}
+
+function openLabelNameEditor({ player, anchorEl, initialValue, initialColor, onSubmit }) {
+    const host = player?.root || player?.container || document.body;
+    if (!host || !anchorEl || typeof onSubmit !== 'function') return;
+
+    const panel = document.createElement('div');
+    panel.className = 'label-name-editor';
+    panel.innerHTML = `
+        <input class="label-name-input" type="text" maxlength="96" />
+        <div class="label-name-color">
+            <span>Color</span>
+            <input class="label-color-input" type="color" />
+        </div>
+        <div class="label-name-suggestions"></div>
+        <div class="label-name-actions">
+            <button type="button" class="label-name-btn cancel">Cancel</button>
+            <button type="button" class="label-name-btn save">Save</button>
+        </div>
+    `;
+    host.appendChild(panel);
+
+    const input = panel.querySelector('.label-name-input');
+    const colorInput = panel.querySelector('.label-color-input');
+    const sugg = panel.querySelector('.label-name-suggestions');
+    const saveBtn = panel.querySelector('.label-name-btn.save');
+    const cancelBtn = panel.querySelector('.label-name-btn.cancel');
+    input.value = String(initialValue || '').trim();
+    const initialStyle = getOverlayColorStyle(initialColor);
+    colorInput.value = initialStyle?.hex || '#0ea5e9';
+
+    const anchorRect = anchorEl.getBoundingClientRect();
+    const hostRect = host.getBoundingClientRect();
+    panel.style.left = `${Math.max(4, anchorRect.left - hostRect.left)}px`;
+    panel.style.top = `${Math.max(4, anchorRect.bottom - hostRect.top + 6)}px`;
+
+    const close = () => {
+        if (panel.parentNode) panel.parentNode.removeChild(panel);
+    };
+
+    const submit = (value) => {
+        const trimmed = String(value || '').trim();
+        if (!trimmed) return;
+        onSubmit({ name: trimmed, color: colorInput.value });
+        close();
+    };
+
+    const renderSuggestions = () => {
+        const taxonomy = player?.getLabelTaxonomy?.() || [];
+        const recent = player?.getLabelSuggestions?.('', 8) || [];
+        const filtered = player?.getLabelSuggestions?.(input.value, 8) || [];
+        const names = [];
+        const seen = new Set();
+        for (const name of recent) {
+            if (!name || seen.has(name)) continue;
+            seen.add(name);
+            names.push(name);
+        }
+        for (const name of filtered) {
+            if (!name || seen.has(name)) continue;
+            seen.add(name);
+            names.push(name);
+        }
+        sugg.innerHTML = '';
+        for (const item of taxonomy) {
+            if (!item?.name) continue;
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'label-name-chip taxonomy';
+            chip.textContent = item.shortcut ? `${item.shortcut}: ${item.name}` : item.name;
+            if (item.color) chip.style.setProperty('--chip-color', item.color);
+            chip.addEventListener('click', () => {
+                if (item.color) colorInput.value = getOverlayColorStyle(item.color)?.hex || colorInput.value;
+                submit(item.name);
+            });
+            sugg.appendChild(chip);
+        }
+        for (const name of names) {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'label-name-chip';
+            chip.textContent = name;
+            chip.addEventListener('click', () => submit(name));
+            sugg.appendChild(chip);
+        }
+    };
+
+    input.addEventListener('input', renderSuggestions);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            submit(input.value);
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            close();
+        }
+    });
+    saveBtn.addEventListener('click', () => submit(input.value));
+    cancelBtn.addEventListener('click', close);
+    setTimeout(() => input.focus(), 0);
+    input.select();
+    renderSuggestions();
+}
+
 /**
  * @typedef {Object} AnnotationRegion
  * @property {string} [id]
@@ -128,7 +290,12 @@ export class AnnotationLayer {
         el.setAttribute('tabindex', '0');
         el.style.left = `${Math.max(0, region.start * pixelsPerSecond)}px`;
         el.style.width = `${Math.max(1, (region.end - region.start) * pixelsPerSecond)}px`;
-        if (region.color) el.style.setProperty('--annotation-color', region.color);
+        const colorStyle = getOverlayColorStyle(region.color);
+        if (colorStyle) {
+            el.style.setProperty('--annotation-color-fill', colorStyle.fill);
+            el.style.setProperty('--annotation-color-edge', colorStyle.edge);
+            el.style.setProperty('--annotation-color-soft', colorStyle.soft);
+        }
 
         el.dataset.id = region.id;
         el.dataset.start = String(region.start);
@@ -145,11 +312,19 @@ export class AnnotationLayer {
             if (performance.now() < this._suppressClickUntil) return;
             event.preventDefault();
             event.stopPropagation();
+            this.player?._emit?.('labelfocus', { id: region.id, source: 'waveform' });
             this.player?._state?._blockSeekClicks?.(260);
             this.player?.playSegment?.(region.start, region.end, { labelId: region.id });
         });
+        el.addEventListener('dblclick', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            this._suppressClickUntil = performance.now() + 250;
+            this._renameRegionPrompt(region.id);
+        });
         el.addEventListener('pointerdown', (event) => {
             if (event.button !== 0) return;
+            this.player?._emit?.('labelfocus', { id: region.id, source: 'waveform' });
             const handle = event.target?.closest?.('.annotation-handle');
             const mode = handle?.dataset?.mode || 'move';
             this._startEditInteraction(region.id, mode, event.clientX, el);
@@ -249,6 +424,27 @@ export class AnnotationLayer {
         }
     }
 
+    _renameRegionPrompt(id) {
+        const region = this.annotations.find((a) => a.id === id);
+        if (!region) return;
+        const current = region.species || 'Annotation';
+        const el = this.overlay?.querySelector?.(`.annotation-region[data-id="${region.id}"]`);
+        openLabelNameEditor({
+            player: this.player,
+            anchorEl: el || this.overlay,
+            initialValue: current,
+            initialColor: region.color,
+            onSubmit: ({ name, color }) => {
+                const currentHex = getOverlayColorStyle(region.color)?.hex || '';
+                if (name === current && color === currentHex) return;
+                region.species = name;
+                region.color = color;
+                this.player?._emit?.('annotationupdate', { annotation: { ...region } });
+                this.render();
+            },
+        });
+    }
+
     _normalize(annotation) {
         const start = Number(annotation?.start ?? 0);
         const end = Number(annotation?.end ?? start);
@@ -263,7 +459,7 @@ export class AnnotationLayer {
             end: Math.max(s + 0.01, e),
             species: annotation?.species || '',
             confidence: annotation?.confidence,
-            color: annotation?.color || '',
+            color: String(annotation?.color || '').trim(),
         };
     }
 }
@@ -390,7 +586,12 @@ export class SpectrogramLabelLayer {
         el.setAttribute('tabindex', '0');
 
         this._applyGeometryToElement(el, this._toGeometry(label, canvasWidth, canvasHeight));
-        if (label.color) el.style.setProperty('--spectrogram-label-color', label.color);
+        const colorStyle = getOverlayColorStyle(label.color);
+        if (colorStyle) {
+            el.style.setProperty('--spectrogram-label-color', colorStyle.fill);
+            el.style.setProperty('--spectrogram-label-edge', colorStyle.edge);
+            el.style.setProperty('--spectrogram-label-soft', colorStyle.soft);
+        }
 
         el.dataset.id = label.id;
         el.dataset.start = String(label.start);
@@ -413,6 +614,7 @@ export class SpectrogramLabelLayer {
             if (performance.now() < this._suppressClickUntil) return;
             event.stopPropagation();
             event.preventDefault();
+            this.player?._emit?.('labelfocus', { id: label.id, source: 'spectrogram' });
             this.player?._state?._blockSeekClicks?.(260);
             this.player?.playBandpassedSegment?.(
                 label.start,
@@ -422,8 +624,15 @@ export class SpectrogramLabelLayer {
                 { labelId: label.id },
             );
         });
+        el.addEventListener('dblclick', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            this._suppressClickUntil = performance.now() + 250;
+            this._renameSpectrogramLabelPrompt(label.id);
+        });
         el.addEventListener('pointerdown', (event) => {
             if (event.button !== 0) return;
+            this.player?._emit?.('labelfocus', { id: label.id, source: 'spectrogram' });
             const handle = event.target?.closest?.('.label-handle');
             const mode = handle?.dataset?.mode || 'move';
             this._startEditInteraction(label.id, mode, event.clientX, event.clientY, el);
@@ -686,6 +895,27 @@ export class SpectrogramLabelLayer {
         }
     }
 
+    _renameSpectrogramLabelPrompt(id) {
+        const label = this.labels.find((l) => l.id === id);
+        if (!label) return;
+        const current = label.label || 'Label';
+        const el = this.overlay?.querySelector?.(`.spectrogram-label-region[data-id="${label.id}"]`);
+        openLabelNameEditor({
+            player: this.player,
+            anchorEl: el || this.overlay,
+            initialValue: current,
+            initialColor: label.color,
+            onSubmit: ({ name, color }) => {
+                const currentHex = getOverlayColorStyle(label.color)?.hex || '';
+                if (name === current && color === currentHex) return;
+                label.label = name;
+                label.color = color;
+                this.player?._emit?.('spectrogramlabelupdate', { label: { ...label } });
+                this.render();
+            },
+        });
+    }
+
     _clientXToTime(clientX) {
         return this.player?._state?._clientXToTime?.(clientX, 'spectrogram') || 0;
     }
@@ -729,7 +959,7 @@ export class SpectrogramLabelLayer {
             freqMin: f0,
             freqMax: Math.max(f0 + 1, f1),
             label: label?.label || '',
-            color: label?.color || '',
+            color: String(label?.color || '').trim(),
         };
     }
 }
