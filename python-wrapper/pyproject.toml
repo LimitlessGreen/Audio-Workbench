@@ -9,10 +9,10 @@ description = "Python wrapper for Audio Workbench Player (HTML/Streamlit embeddi
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Dein Name" }]
-license = { text = "CC BY-NC 4.0" }
+license = { text = "AGPL-3.0-only" }
 classifiers = [
   "Programming Language :: Python :: 3",
-  "License :: Other/Proprietary License",
+  "License :: OSI Approved :: GNU Affero General Public License v3",
   "Operating System :: OS Independent"
 ]
 
