@@ -21,6 +21,7 @@ export const DEFAULT_OPTIONS = {
     transportStyle:     'default', // default | hero
     transportOverlay:   false,  // Overlay mode: centered play button without toolbar height
     showWaveformTimeline: true, // Draw bottom timeline row in waveform view
+    compactToolbar:     'auto', // auto | on | off
     followGuardLeftRatio: 0.35,       // Follow mode lower guard (0..1)
     followGuardRightRatio: 0.65,      // Follow mode upper guard (0..1)
     followTargetRatio: 0.5,           // Viewport target position for catchup
@@ -41,17 +42,20 @@ export function createPlayerHTML(opts = {}) {
     const hide = (flag) => flag ? '' : ' style="display:none"';
     const viewMode = ['both', 'waveform', 'spectrogram'].includes(o.viewMode) ? o.viewMode : 'both';
     const transportStyle = o.transportStyle === 'hero' ? 'hero' : 'default';
+    const compactToolbar = ['auto', 'on', 'off'].includes(o.compactToolbar) ? o.compactToolbar : 'auto';
     const shellClass = [
         'daw-shell',
         `view-mode-${viewMode}`,
         `transport-style-${transportStyle}`,
+        `compact-toolbar-${compactToolbar}`,
         o.transportOverlay ? 'transport-overlay' : '',
     ].join(' ');
 
     return `<div class="${shellClass}">
 
     <!-- ═══ Top Toolbar ═══ -->
-    <div class="toolbar">
+    <div class="toolbar" id="toolbarRoot">
+      <div class="toolbar-primary">
         <button class="toolbar-btn file-btn" id="openFileBtn" title="Audio-Datei laden"${hide(o.showFileOpen)}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 15v4a2 2 0 002 2h14a2 2 0 002-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             Open
@@ -86,6 +90,10 @@ export function createPlayerHTML(opts = {}) {
         <div class="time-display" id="timeDisplay" role="status" aria-live="polite"${hide(o.showTime)}>
             <span id="currentTime">00:00.0</span><span class="time-sep">/</span><span id="totalTime">00:00.0</span>
         </div>
+        <button class="toolbar-btn compact-more-btn" id="compactMoreBtn" aria-expanded="false" title="Weitere Controls anzeigen">More</button>
+      </div>
+
+      <div class="toolbar-secondary" id="toolbarSecondary">
 
         <div class="toolbar-sep"${hide(o.showVolume)}></div>
 
@@ -160,6 +168,7 @@ export function createPlayerHTML(opts = {}) {
             <input type="range" id="ceilSlider" class="toolbar-range toolbar-range-sm" min="0" max="100" value="100" title="Spectrogram Ceiling (Weißpunkt)">
             <button class="toolbar-btn mini-btn" id="autoContrastBtn" disabled title="Kontrast automatisch optimieren">AC</button>
         </span>
+      </div>
     </div>
 
     <!-- ═══ Main Content ═══ -->

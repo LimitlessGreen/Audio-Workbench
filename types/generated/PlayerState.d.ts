@@ -3,6 +3,9 @@ export class PlayerState {
     container: any;
     d: {
         openFileBtn: any;
+        toolbarRoot: any;
+        compactMoreBtn: any;
+        toolbarSecondary: any;
         audioFile: any;
         playPauseBtn: any;
         stopBtn: any;
@@ -62,6 +65,9 @@ export class PlayerState {
     _showSpectrogram: boolean;
     _showOverview: boolean;
     _transportOverlay: boolean;
+    _compactToolbarMode: any;
+    _compactToolbarOpen: boolean;
+    _compactToolbarLayoutRaf: number;
     _showWaveformTimeline: boolean;
     _playbackViewportConfig: any;
     processor: {
@@ -101,7 +107,7 @@ export class PlayerState {
     muted: boolean;
     preMuteVolume: number;
     pixelsPerSecond: number;
-    zoomRedrawTimeout: number;
+    _zoomRedrawRafId: number;
     scrollSyncLock: boolean;
     windowStartNorm: number;
     windowEndNorm: number;
@@ -183,6 +189,10 @@ export class PlayerState {
     overviewDragStartX: number;
     overviewDragStart: number;
     overviewDragEnd: number;
+    _overviewDragMoved: boolean;
+    _overviewSuppressClickUntil: number;
+    _overviewViewportRafId: number;
+    _overviewNeedsFinalRedraw: boolean;
     waveformDisplayHeight: number;
     spectrogramDisplayHeight: number;
     viewResizeMode: any;
@@ -211,6 +221,9 @@ export class PlayerState {
     _flushUiUpdate(_ts: any): void;
     _queryDom(root: any): {
         openFileBtn: any;
+        toolbarRoot: any;
+        compactMoreBtn: any;
+        toolbarSecondary: any;
         audioFile: any;
         playPauseBtn: any;
         stopBtn: any;
@@ -327,9 +340,14 @@ export class PlayerState {
     _clientXToTime(clientX: any, source?: string): number;
     _syncOverviewWindowToViewport(): void;
     _updateOverviewWindowElement(): void;
+    _getOverviewSpanConstraints(): {
+        minSpanNorm: number;
+        maxSpanNorm: number;
+    };
     _startOverviewDrag(mode: any, clientX: any): void;
     _updateOverviewDrag(clientX: any): void;
-    _applyOverviewWindowToViewport(): void;
+    _queueOverviewViewportApply(redrawFinal?: boolean): void;
+    _applyOverviewWindowToViewport(redraw?: boolean): void;
     _handleCanvasClick(e: any): void;
     _handleWaveformClick(e: any): void;
     _blockSeekClicks(ms?: number): void;
@@ -350,6 +368,11 @@ export class PlayerState {
     }): void;
     _flushResizeRedraw(force: any): void;
     _setPlayState(text: any): void;
+    _shouldCompactToolbarBeActive(): boolean;
+    _isCompactToolbarActive(): any;
+    _queueCompactToolbarLayoutRefresh(): void;
+    _refreshCompactToolbarLayout(): void;
+    _setCompactToolbarOpen(nextOpen: any): void;
     _setTransportEnabled(enabled: any): void;
     _updateToggleButtons(): void;
     _cycleFollowMode(): void;

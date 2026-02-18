@@ -17,6 +17,7 @@ export namespace DEFAULT_OPTIONS {
     let transportStyle: string;
     let transportOverlay: boolean;
     let showWaveformTimeline: boolean;
+    let compactToolbar: string;
     let followGuardLeftRatio: number;
     let followGuardRightRatio: number;
     let followTargetRatio: number;

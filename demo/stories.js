@@ -5,6 +5,9 @@ function makeBaseContainer(root, height = 520) {
     root.innerHTML = '';
     const wrap = document.createElement('div');
     wrap.style.height = `${height}px`;
+    wrap.style.width = '100%';
+    wrap.style.maxWidth = '100%';
+    wrap.style.minWidth = '0';
     wrap.style.border = '1px solid #d5ddea';
     wrap.style.borderRadius = '12px';
     wrap.style.background = '#ffffff';
@@ -35,8 +38,9 @@ export const stories = [
             root.innerHTML = '';
             const shell = document.createElement('div');
             shell.style.display = 'grid';
-            shell.style.gridTemplateColumns = '280px 1fr';
+            shell.style.gridTemplateColumns = 'minmax(220px, 280px) minmax(0, 1fr)';
             shell.style.gap = '12px';
+            shell.style.minWidth = '0';
             root.appendChild(shell);
 
             const controls = document.createElement('div');
@@ -47,9 +51,11 @@ export const stories = [
             controls.style.display = 'grid';
             controls.style.gap = '8px';
             controls.style.alignContent = 'start';
+            controls.style.minWidth = '0';
             shell.appendChild(controls);
 
             const stage = document.createElement('div');
+            stage.style.minWidth = '0';
             shell.appendChild(stage);
 
             const options = {
@@ -66,6 +72,7 @@ export const stories = [
                 viewMode: 'both',
                 transportStyle: 'default',
                 transportOverlay: false,
+                compactToolbar: 'auto',
                 height: 520,
             };
 
@@ -143,6 +150,9 @@ export const stories = [
             });
             makeSelectRow('Transport Overlay', ['false', 'true'], String(options.transportOverlay), (value) => {
                 options.transportOverlay = value === 'true';
+            });
+            makeSelectRow('Compact Toolbar', ['auto', 'on', 'off'], options.compactToolbar, (value) => {
+                options.compactToolbar = value;
             });
 
             const sizeRow = document.createElement('label');

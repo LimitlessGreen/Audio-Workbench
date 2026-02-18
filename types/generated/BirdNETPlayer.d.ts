@@ -18,6 +18,7 @@ export class BirdNETPlayer {
      * @param {'default'|'hero'} [options.transportStyle] — transport button style (default: default)
      * @param {boolean}     [options.transportOverlay] — centered play overlay without toolbar height (default: false)
      * @param {boolean}     [options.showWaveformTimeline] — show bottom waveform timeline (default: true)
+     * @param {'auto'|'on'|'off'} [options.compactToolbar] — responsive toolbar compaction mode (default: auto)
      * @param {number}      [options.followGuardLeftRatio] — left follow guard ratio (default: 0.35)
      * @param {number}      [options.followGuardRightRatio] — right follow guard ratio (default: 0.65)
      * @param {number}      [options.followTargetRatio] — target ratio for viewport centering (default: 0.5)
@@ -45,6 +46,7 @@ export class BirdNETPlayer {
         transportStyle?: "default" | "hero";
         transportOverlay?: boolean;
         showWaveformTimeline?: boolean;
+        compactToolbar?: "auto" | "on" | "off";
         followGuardLeftRatio?: number;
         followGuardRightRatio?: number;
         followTargetRatio?: number;
@@ -73,6 +75,7 @@ export class BirdNETPlayer {
         transportStyle?: "default" | "hero";
         transportOverlay?: boolean;
         showWaveformTimeline?: boolean;
+        compactToolbar?: "auto" | "on" | "off";
         followGuardLeftRatio?: number;
         followGuardRightRatio?: number;
         followTargetRatio?: number;

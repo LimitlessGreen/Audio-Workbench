@@ -76,6 +76,11 @@ export class PlayerState {
         this._showSpectrogram = this._viewMode !== 'waveform';
         this._showOverview = this.options.showOverview !== false;
         this._transportOverlay = this.options.transportOverlay === true;
+        this._compactToolbarMode = ['auto', 'on', 'off'].includes(this.options.compactToolbar)
+            ? this.options.compactToolbar
+            : 'auto';
+        this._compactToolbarOpen = false;
+        this._compactToolbarLayoutRaf = 0;
         this._showWaveformTimeline = this.options.showWaveformTimeline !== false
             && !(this.options.transportOverlay && this._viewMode === 'waveform');
         this._playbackViewportConfig = this._sanitizePlaybackViewportConfig(this.options || {});
@@ -104,7 +109,7 @@ export class PlayerState {
 
         // ── Zoom / viewport ──
         this.pixelsPerSecond = DEFAULT_ZOOM_PPS;
-        this.zoomRedrawTimeout = null;
+        this._zoomRedrawRafId = 0;
         this.scrollSyncLock = false;
         this.windowStartNorm = 0;
         this.windowEndNorm = 1;
@@ -164,6 +169,10 @@ export class PlayerState {
         this.overviewDragStartX = 0;
         this.overviewDragStart = 0;
         this.overviewDragEnd = 1;
+        this._overviewDragMoved = false;
+        this._overviewSuppressClickUntil = 0;
+        this._overviewViewportRafId = 0;
+        this._overviewNeedsFinalRedraw = false;
 
         // ── View resize ──
         this.waveformDisplayHeight = DEFAULT_WAVEFORM_HEIGHT;
@@ -182,6 +191,7 @@ export class PlayerState {
         this._setInitialPlayheadPositions();
         this._updateToggleButtons();
         this._updateAriaPlaybackPosition(0);
+        this._setCompactToolbarOpen(false);
         this._setTransportState('idle', 'init');
         this._initPerfOverlay();
 
@@ -191,6 +201,8 @@ export class PlayerState {
         if (this.options.enableTouchGestures !== false) {
             this._bindTouchGestures();
         }
+        this._refreshCompactToolbarLayout();
+        requestAnimationFrame(() => this._refreshCompactToolbarLayout());
     }
 
     _emit(event, detail = {}) {
@@ -372,6 +384,9 @@ export class PlayerState {
         const q = (id) => root.querySelector(`#${id}`);
         return {
             openFileBtn:            q('openFileBtn'),
+            toolbarRoot:            q('toolbarRoot'),
+            compactMoreBtn:         q('compactMoreBtn'),
+            toolbarSecondary:       q('toolbarSecondary'),
             audioFile:              q('audioFile'),
             playPauseBtn:           q('playPauseBtn'),
             stopBtn:                q('stopBtn'),
@@ -439,6 +454,18 @@ export class PlayerState {
         if (this._uiFrameId) {
             cancelAnimationFrame(this._uiFrameId);
             this._uiFrameId = 0;
+        }
+        if (this._zoomRedrawRafId) {
+            cancelAnimationFrame(this._zoomRedrawRafId);
+            this._zoomRedrawRafId = 0;
+        }
+        if (this._overviewViewportRafId) {
+            cancelAnimationFrame(this._overviewViewportRafId);
+            this._overviewViewportRafId = 0;
+        }
+        if (this._compactToolbarLayoutRaf) {
+            cancelAnimationFrame(this._compactToolbarLayoutRaf);
+            this._compactToolbarLayoutRaf = 0;
         }
         if (this._perf.intervalId) {
             clearInterval(this._perf.intervalId);
@@ -1410,12 +1437,13 @@ export class PlayerState {
     }
 
     _requestSpectrogramRedraw() {
-        if (this.zoomRedrawTimeout) clearTimeout(this.zoomRedrawTimeout);
-        this.zoomRedrawTimeout = setTimeout(() => {
+        if (this._zoomRedrawRafId) return;
+        this._zoomRedrawRafId = requestAnimationFrame(() => {
+            this._zoomRedrawRafId = 0;
             if (!this.audioBuffer) return;
             if (this.spectrogramData && this.spectrogramFrames > 0) this._drawSpectrogram();
             this._drawMainWaveform();
-        }, 90);
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -1601,6 +1629,7 @@ export class PlayerState {
 
     _syncOverviewWindowToViewport() {
         if (!this._showOverview || !this.audioBuffer) return;
+        if (this.overviewMode) return;
         const trackWidth = Math.max(
             this.d.spectrogramCanvas.width || 0,
             this.d.amplitudeCanvas.width || 0,
@@ -1652,49 +1681,83 @@ export class PlayerState {
         this.d.overviewWindow.style.width = `${width}px`;
     }
 
+    _getOverviewSpanConstraints() {
+        const duration = Math.max(0.001, this.audioBuffer?.duration || 0.001);
+        const vw = Math.max(1, this._getViewportWidth());
+        const minPps = Math.max(1, Number(this.d.zoomSlider?.min || 20));
+        const maxPps = Math.max(minPps, Number(this.d.zoomSlider?.max || 600));
+        const minSpanNorm = Math.max(MIN_WINDOW_NORM, (vw / maxPps) / duration);
+        const maxSpanNorm = Math.min(1, (vw / minPps) / duration);
+        return {
+            minSpanNorm: Math.min(minSpanNorm, 1),
+            maxSpanNorm: Math.max(minSpanNorm, maxSpanNorm),
+        };
+    }
+
     _startOverviewDrag(mode, clientX) {
         this.overviewMode = mode;
         this.overviewDragStartX = clientX;
         this.overviewDragStart = this.windowStartNorm;
         this.overviewDragEnd = this.windowEndNorm;
+        this._overviewDragMoved = false;
     }
 
     _updateOverviewDrag(clientX) {
         if (!this._showOverview || !this.audioBuffer || !this.overviewMode) return;
+        if (Math.abs(clientX - this.overviewDragStartX) > 2) this._overviewDragMoved = true;
 
         const cw = this.d.overviewContainer.clientWidth;
         const deltaNorm = (clientX - this.overviewDragStartX) / cw;
+        const { minSpanNorm, maxSpanNorm } = this._getOverviewSpanConstraints();
+        const fixedStart = this.overviewDragStart;
+        const fixedEnd = this.overviewDragEnd;
 
         if (this.overviewMode === 'move') {
-            let s = this.overviewDragStart + deltaNorm;
-            let e = this.overviewDragEnd + deltaNorm;
+            let s = fixedStart + deltaNorm;
+            let e = fixedEnd + deltaNorm;
             const span = e - s;
             if (s < 0) { s = 0; e = span; }
             if (e > 1) { e = 1; s = 1 - span; }
             this.windowStartNorm = s;
             this.windowEndNorm = e;
         } else if (this.overviewMode === 'left') {
-            this.windowStartNorm = Math.max(0, Math.min(
-                this.overviewDragStart + deltaNorm,
-                this.windowEndNorm - MIN_WINDOW_NORM,
-            ));
+            const nextStart = fixedStart + deltaNorm;
+            const right = fixedEnd;
+            const minStart = Math.max(0, right - maxSpanNorm);
+            const maxStart = Math.max(minStart, right - minSpanNorm);
+            this.windowStartNorm = Math.max(minStart, Math.min(maxStart, nextStart));
+            this.windowEndNorm = right;
         } else if (this.overviewMode === 'right') {
-            this.windowEndNorm = Math.min(1, Math.max(
-                this.overviewDragEnd + deltaNorm,
-                this.windowStartNorm + MIN_WINDOW_NORM,
-            ));
+            const nextEnd = fixedEnd + deltaNorm;
+            const left = fixedStart;
+            const minEnd = Math.min(1, left + minSpanNorm);
+            const maxEnd = Math.min(1, left + maxSpanNorm);
+            this.windowEndNorm = Math.max(minEnd, Math.min(maxEnd, nextEnd));
+            this.windowStartNorm = left;
         }
 
         this._updateOverviewWindowElement();
-        this._applyOverviewWindowToViewport();
+        this._queueOverviewViewportApply(false);
     }
 
-    _applyOverviewWindowToViewport() {
+    _queueOverviewViewportApply(redrawFinal = false) {
+        this._overviewNeedsFinalRedraw = this._overviewNeedsFinalRedraw || redrawFinal;
+        if (this._overviewViewportRafId) return;
+        this._overviewViewportRafId = requestAnimationFrame(() => {
+            this._overviewViewportRafId = 0;
+            const redraw = this._overviewNeedsFinalRedraw;
+            this._overviewNeedsFinalRedraw = false;
+            this._applyOverviewWindowToViewport(redraw);
+            if (!redraw) this._requestSpectrogramRedraw();
+        });
+    }
+
+    _applyOverviewWindowToViewport(redraw = true) {
         if (!this._showOverview || !this.audioBuffer) return;
         const dur = this.audioBuffer.duration;
         const viewDur = Math.max(0.01, (this.windowEndNorm - this.windowStartNorm) * dur);
         const targetPps = this._getViewportWidth() / viewDur;
-        this._setPixelsPerSecond(targetPps, true, this.windowStartNorm * dur, 0);
+        this._setPixelsPerSecond(targetPps, redraw, this.windowStartNorm * dur, 0);
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -1905,6 +1968,51 @@ export class PlayerState {
         this.d.playStateDisplay.textContent = text;
     }
 
+    _shouldCompactToolbarBeActive() {
+        if (this._transportOverlay) return false;
+        if (this._compactToolbarMode === 'off') return false;
+        if (this._compactToolbarMode === 'on') return true;
+        const root = this.d.toolbarRoot;
+        if (!root) return false;
+        const hadActive = this.container.classList.contains('compact-toolbar-active');
+        const hadOpen = this.container.classList.contains('compact-toolbar-open');
+        if (hadActive) this.container.classList.remove('compact-toolbar-active');
+        if (hadOpen) this.container.classList.remove('compact-toolbar-open');
+        const needsCompact = root.scrollWidth > root.clientWidth + 4;
+        if (hadActive) this.container.classList.add('compact-toolbar-active');
+        if (hadOpen) this.container.classList.add('compact-toolbar-open');
+        return needsCompact;
+    }
+
+    _isCompactToolbarActive() {
+        return this.container.classList.contains('compact-toolbar-active');
+    }
+
+    _queueCompactToolbarLayoutRefresh() {
+        if (this._compactToolbarLayoutRaf) return;
+        this._compactToolbarLayoutRaf = requestAnimationFrame(() => {
+            this._compactToolbarLayoutRaf = 0;
+            this._refreshCompactToolbarLayout();
+        });
+    }
+
+    _refreshCompactToolbarLayout() {
+        const active = this._shouldCompactToolbarBeActive();
+        this.container.classList.toggle('compact-toolbar-active', active);
+        if (!active && this._compactToolbarOpen) this._setCompactToolbarOpen(false);
+        if (this.d.compactMoreBtn) {
+            this.d.compactMoreBtn.disabled = !active;
+            this.d.compactMoreBtn.setAttribute('aria-hidden', active ? 'false' : 'true');
+        }
+    }
+
+    _setCompactToolbarOpen(nextOpen) {
+        const open = this._isCompactToolbarActive() && !!nextOpen;
+        this._compactToolbarOpen = open;
+        this.container.classList.toggle('compact-toolbar-open', open);
+        if (this.d.compactMoreBtn) this.d.compactMoreBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
     _setTransportEnabled(enabled) {
         [
             this.d.playPauseBtn, this.d.stopBtn,
@@ -1914,6 +2022,7 @@ export class PlayerState {
             this.d.fitViewBtn, this.d.resetViewBtn,
             this.d.autoContrastBtn, this.d.autoFreqBtn,
         ].forEach((btn) => { btn.disabled = !enabled; });
+        this._queueCompactToolbarLayoutRefresh();
     }
 
     _updateToggleButtons() {
@@ -1931,6 +2040,7 @@ export class PlayerState {
             this.d.loopToggleBtn.classList.toggle('active', this.loopPlayback);
             this.d.loopToggleBtn.textContent = this.loopPlayback ? 'Loop On' : 'Loop';
         }
+        this._queueCompactToolbarLayoutRefresh();
     }
 
     _cycleFollowMode() {
@@ -2066,6 +2176,11 @@ export class PlayerState {
 
         // ── File / transport ──
         on(this.d.openFileBtn, 'click', () => this.d.audioFile.click());
+        on(this.d.compactMoreBtn, 'click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this._setCompactToolbarOpen(!this._compactToolbarOpen);
+        });
         on(this.d.audioFile, 'change', (e) => this._handleFileSelect(e));
         on(this.d.playPauseBtn, 'click', () => this._togglePlayPause());
         on(this.d.stopBtn, 'click', () => this._stopPlayback());
@@ -2197,6 +2312,10 @@ export class PlayerState {
             if (this.draggingViewport) { this.draggingViewport = false; document.body.style.cursor = ''; }
             this.draggingPlayhead = false;
             this.draggingPlayheadSource = null;
+            if (this.overviewMode) this._queueOverviewViewportApply(true);
+            if (this.overviewMode && this._overviewDragMoved) {
+                this._overviewSuppressClickUntil = performance.now() + 260;
+            }
             this.overviewMode = null;
         };
         on(document, 'pointerup', releaseAll);
@@ -2204,6 +2323,14 @@ export class PlayerState {
 
         // ── Keyboard ──
         on(document, 'keydown', (e) => this._handleKeyboardShortcuts(e));
+        on(document, 'keydown', (e) => {
+            if (e.key === 'Escape' && this._compactToolbarOpen) this._setCompactToolbarOpen(false);
+        });
+        on(document, 'pointerdown', (e) => {
+            if (!this._compactToolbarOpen) return;
+            if (this.d.toolbarRoot?.contains(e.target)) return;
+            this._setCompactToolbarOpen(false);
+        });
 
         // ── Overview ──
         on(this.d.overviewHandleLeft, 'pointerdown', (e) => {
@@ -2223,6 +2350,7 @@ export class PlayerState {
             this._startOverviewDrag('move', e.clientX);
         });
         on(this.d.overviewCanvas, 'click', (e) => {
+            if (performance.now() < this._overviewSuppressClickUntil) return;
             if (!this._showOverview) return;
             if (!this.audioBuffer) return;
             const rect = this.d.overviewCanvas.getBoundingClientRect();
@@ -2232,6 +2360,8 @@ export class PlayerState {
 
         // ── Window ──
         on(window, 'resize', () => {
+            this._queueCompactToolbarLayoutRefresh();
+            if (!this._shouldCompactToolbarBeActive()) this._setCompactToolbarOpen(false);
             if (!this.audioBuffer) return;
             this._drawMainWaveform();
             this._drawOverviewWaveform();
