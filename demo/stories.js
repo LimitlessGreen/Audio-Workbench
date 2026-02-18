@@ -1,5 +1,4 @@
 const SAMPLE_BIRD = './samples/birdsong.wav';
-const SAMPLE_TONE = './samples/tones-1k.wav';
 const SAMPLE_SWEEP = './samples/sweep-200-8000.wav';
 
 function makeBaseContainer(root, height = 520) {
@@ -176,19 +175,6 @@ export const stories = [
         },
     },
     {
-        id: 'minimal',
-        title: 'Minimal Player',
-        description: 'Nur File-Open + Transport + Timeline.',
-        async run(root) {
-            return createStoryPlayer(root, {
-                showZoom: false,
-                showFFTControls: false,
-                showDisplayGain: false,
-                showViewToggles: false,
-            });
-        },
-    },
-    {
         id: 'full',
         title: 'Full DAW',
         description: 'Vollständiger Player mit allen Controls.',
@@ -208,29 +194,6 @@ export const stories = [
                 player._state._buildSpectrogramBaseImage();
                 player._state._drawSpectrogram();
             });
-        },
-    },
-    {
-        id: 'waveform-focus',
-        title: 'Waveform Focus',
-        description: 'Waveform-only Look (spektrale Controls versteckt).',
-        async run(root) {
-            return createStoryPlayer(root, {
-                showFFTControls: false,
-                showDisplayGain: false,
-            }, SAMPLE_BIRD);
-        },
-    },
-    {
-        id: 'compact',
-        title: 'Compact Embed',
-        description: 'Kompakte Einbettung für kleine Panels.',
-        async run(root) {
-            return createStoryPlayer(root, {
-                showStatusbar: false,
-                showViewToggles: false,
-                height: 320,
-            }, SAMPLE_TONE);
         },
     },
     {
