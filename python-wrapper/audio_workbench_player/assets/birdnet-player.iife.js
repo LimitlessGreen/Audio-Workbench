@@ -2017,6 +2017,13 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       this._perf.enabled = true;
       const panel = document.createElement("div");
       panel.className = "abp-perf-overlay";
+      panel.style.position = "absolute";
+      panel.style.top = "8px";
+      panel.style.right = "8px";
+      panel.style.left = "auto";
+      panel.style.bottom = "auto";
+      panel.style.transform = "none";
+      panel.style.zIndex = "60";
       panel.innerHTML = `
             <div class="abp-perf-title">PERF</div>
             <div class="abp-perf-body">Initializing...</div>
