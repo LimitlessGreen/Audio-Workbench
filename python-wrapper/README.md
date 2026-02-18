@@ -42,3 +42,7 @@ streamlit run demo_streamlit.py
 pip install gradio
 python demo_gradio.py
 ```
+
+## License
+
+CC BY-NC 4.0 (Non-Commercial)

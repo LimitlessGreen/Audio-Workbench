@@ -249,4 +249,4 @@ python -m twine upload dist/*
 
 ## License
 
-MIT
+CC BY-NC 4.0 (Non-Commercial)
