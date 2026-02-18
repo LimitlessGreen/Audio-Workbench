@@ -71,6 +71,7 @@ def _read_file_bytes(file_obj):
 
 def _build_options(
     preset,
+    apply_advanced_overrides,
     view_mode,
     transport_style,
     transport_overlay,
@@ -86,23 +87,24 @@ def _build_options(
     show_overview,
 ):
     options = dict(PRESETS.get(preset, {}))
-    options.update(
-        {
-            "viewMode": view_mode,
-            "transportStyle": transport_style,
-            "transportOverlay": transport_overlay,
-            "showWaveformTimeline": show_waveform_timeline,
-            "showFileOpen": show_file_open,
-            "showTime": show_time,
-            "showVolume": show_volume,
-            "showViewToggles": show_view_toggles,
-            "showZoom": show_zoom,
-            "showFFTControls": show_fft_controls,
-            "showDisplayGain": show_display_gain,
-            "showStatusbar": show_statusbar,
-            "showOverview": show_overview,
-        }
-    )
+    if apply_advanced_overrides:
+        options.update(
+            {
+                "viewMode": view_mode,
+                "transportStyle": transport_style,
+                "transportOverlay": transport_overlay,
+                "showWaveformTimeline": show_waveform_timeline,
+                "showFileOpen": show_file_open,
+                "showTime": show_time,
+                "showVolume": show_volume,
+                "showViewToggles": show_view_toggles,
+                "showZoom": show_zoom,
+                "showFFTControls": show_fft_controls,
+                "showDisplayGain": show_display_gain,
+                "showStatusbar": show_statusbar,
+                "showOverview": show_overview,
+            }
+        )
     if "Hero" in preset and "height" not in options:
         options["height"] = 240
     return options
@@ -112,6 +114,7 @@ def render_from_upload(
     file_obj,
     preset,
     iframe_height,
+    apply_advanced_overrides,
     view_mode,
     transport_style,
     transport_overlay,
@@ -132,6 +135,7 @@ def render_from_upload(
 
     options = _build_options(
         preset,
+        apply_advanced_overrides,
         view_mode,
         transport_style,
         transport_overlay,
@@ -155,11 +159,16 @@ with gr.Blocks(title="Audio Workbench Player (Gradio Demo)") as demo:
     gr.Markdown("Preset wählen, Optionen setzen und den Embed direkt testen.")
 
     with gr.Row():
-        upload = gr.File(label="Audio-Datei wählen", file_count="single")
+        upload = gr.File(
+            label="Audio-Datei wählen",
+            file_count="single",
+            file_types=["audio"],
+        )
         preset = gr.Dropdown(label="Preset", choices=list(PRESETS.keys()), value="Full DAW")
         iframe_height = gr.Slider(label="Iframe Height", minimum=180, maximum=900, value=620, step=10)
 
     with gr.Accordion("Advanced Player Options", open=False):
+        apply_advanced_overrides = gr.Checkbox(label="Advanced Overrides aktivieren", value=False)
         with gr.Row():
             view_mode = gr.Dropdown(label="viewMode", choices=["both", "waveform", "spectrogram"], value="both")
             transport_style = gr.Dropdown(label="transportStyle", choices=["default", "hero"], value="default")
@@ -184,6 +193,7 @@ with gr.Blocks(title="Audio Workbench Player (Gradio Demo)") as demo:
         upload,
         preset,
         iframe_height,
+        apply_advanced_overrides,
         view_mode,
         transport_style,
         transport_overlay,

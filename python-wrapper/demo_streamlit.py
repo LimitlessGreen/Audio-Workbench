@@ -75,6 +75,7 @@ with st.sidebar:
     preset = st.selectbox("Layout", list(PRESETS.keys()), index=0)
     iframe_height_default = 280 if "Hero" in preset else 620
     iframe_height = st.slider("Iframe Height", min_value=180, max_value=900, value=iframe_height_default, step=10)
+    apply_advanced_overrides = st.checkbox("Advanced Overrides aktivieren", value=False)
 
     with st.expander("Advanced Player Options", expanded=False):
         view_mode = st.selectbox("viewMode", ["both", "waveform", "spectrogram"], index=0)
@@ -96,9 +97,9 @@ uploaded = st.file_uploader("Audio-Datei wählen", type=["wav", "mp3", "ogg", "f
 if uploaded is None:
     st.info("Lade eine Audiodatei hoch, um den Player zu sehen.")
 else:
-    options = merged_options(
-        preset,
-        {
+    overrides = {}
+    if apply_advanced_overrides:
+        overrides = {
             "viewMode": view_mode,
             "transportStyle": transport_style,
             "transportOverlay": transport_overlay,
@@ -112,7 +113,10 @@ else:
             "showDisplayGain": show_display_gain,
             "showStatusbar": show_statusbar,
             "showOverview": show_overview,
-        },
+        }
+    options = merged_options(
+        preset,
+        overrides,
     )
 
     # For Hero presets, keep narrow visual style by default while still allowing overrides.
