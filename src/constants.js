@@ -1,0 +1,21 @@
+// ═══════════════════════════════════════════════════════════════════════
+// constants.js — Shared configuration constants
+// ═══════════════════════════════════════════════════════════════════════
+
+export const DEFAULT_AXIS_WIDTH = 64;
+export const DEFAULT_ZOOM_PPS = 100;
+export const DEFAULT_WAVEFORM_HEIGHT = 100;
+export const DEFAULT_SPECTROGRAM_DISPLAY_HEIGHT = DEFAULT_WAVEFORM_HEIGHT * 2;
+export const MIN_WAVEFORM_HEIGHT = 64;
+export const MIN_SPECTROGRAM_DISPLAY_HEIGHT = 140;
+export const SEEK_FINE_SEC = 0.5;
+export const SEEK_COARSE_SEC = 5;
+export const SPECTROGRAM_HEIGHT = 512;
+export const MAX_BASE_SPECTROGRAM_WIDTH = 24000;
+export const MIN_WINDOW_NORM = 0.02;
+export const PERCH_FRAME_RATE = 100;
+export const PERCH_N_MELS = 160;
+export const PERCH_PCEN_GAIN = 0.8;
+export const PERCH_PCEN_BIAS = 0.01;
+export const PERCH_PCEN_ROOT = 4.0;
+export const PERCH_PCEN_SMOOTHING = 0.025;

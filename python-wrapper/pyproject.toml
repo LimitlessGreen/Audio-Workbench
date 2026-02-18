@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "build"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "audio-workbench-player"
+version = "1.0.0"
+description = "Python wrapper for Audio Workbench Player (HTML/Streamlit embedding)"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Dein Name" }]
+license = { text = "MIT" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent"
+]
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["audio_workbench_player*"]
+
+[tool.setuptools.package-data]
+"audio_workbench_player.assets" = ["*.js", "*.css"]
