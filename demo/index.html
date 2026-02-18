@@ -12,9 +12,9 @@
     .wrap { max-width: 1200px; margin: 24px auto; padding: 0 16px; }
     h1 { margin: 0 0 12px; }
     .card { background: white; border-radius: 12px; padding: 16px; box-shadow: 0 2px 16px rgba(0,0,0,0.08); }
-    .toolbar { margin-top: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    button { border: 1px solid #c9d3e0; background: #fff; border-radius: 8px; padding: 6px 10px; cursor: pointer; }
-    button:hover { background: #f3f7ff; }
+    .demo-toolbar { margin-top: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .demo-toolbar button { border: 1px solid #c9d3e0; background: #fff; border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+    .demo-toolbar button:hover { background: #f3f7ff; }
     #events { margin-top: 12px; background: #0b1020; color: #cfe7ff; border-radius: 8px; padding: 8px; height: 120px; overflow: auto; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
   </style>
 </head>
@@ -23,7 +23,7 @@
     <h1>Audio Workbench Player Demo</h1>
     <div class="card">
       <div id="player"></div>
-      <div class="toolbar">
+      <div class="demo-toolbar">
         <button id="loadDemoAnnotationsBtn">Demo-Annotations laden</button>
         <button id="loadSpectrogramLabelsBtn">Spektrogramm-Labels laden</button>
         <button id="clearAnnotationsBtn">Annotations löschen</button>
