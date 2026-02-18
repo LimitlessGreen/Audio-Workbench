@@ -80,12 +80,32 @@ body {
     background: var(--color-toolbar);
     border-bottom: 1px solid var(--color-border);
     user-select: none;
-    overflow-x: auto;
-    overflow-y: hidden;
-    scrollbar-width: none;
+    position: relative;
+    overflow: hidden;
 }
 
 .toolbar::-webkit-scrollbar { display: none; }
+
+.toolbar-primary,
+.toolbar-secondary {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.toolbar-primary {
+    flex: 0 0 auto;
+}
+
+.toolbar-secondary {
+    flex: 0 1 auto;
+    min-width: max-content;
+}
+
+.compact-more-btn {
+    display: none;
+}
 
 .toolbar-sep {
     width: 1px;
@@ -295,7 +315,11 @@ body {
     overflow: visible;
 }
 
-.daw-shell.transport-overlay .toolbar > :not(.transport) {
+.daw-shell.transport-overlay .toolbar-secondary {
+    display: none !important;
+}
+
+.daw-shell.transport-overlay .toolbar-primary > :not(.transport) {
     display: none !important;
 }
 
@@ -357,6 +381,34 @@ body {
 .daw-shell.transport-overlay .transport-btn.play-btn.playing {
     opacity: 0;
     transform: scale(0.88);
+}
+
+.daw-shell.compact-toolbar-active .compact-more-btn {
+    display: inline-flex;
+}
+
+.daw-shell.compact-toolbar-active .toolbar {
+    overflow: visible;
+}
+
+.daw-shell.compact-toolbar-active .toolbar-secondary {
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    top: calc(100% + 6px);
+    z-index: 35;
+    display: none;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-toolbar);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.daw-shell.compact-toolbar-open.compact-toolbar-active .toolbar-secondary {
+    display: inline-flex;
 }
 
 .transport-btn.play-btn.playing .icon-play {
