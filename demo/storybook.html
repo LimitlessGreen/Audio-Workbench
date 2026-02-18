@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Audio Workbench Player Stories</title>
+  <script src="https://unpkg.com/wavesurfer@7"></script>
+  <script src="../dist/birdnet-player.iife.js"></script>
+  <link rel="stylesheet" href="../dist/birdnet-player.css" />
+  <style>
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: #eef2f8; color: #182235; }
+    .layout { display: grid; grid-template-columns: 320px 1fr; min-height: 100vh; }
+    .sidebar { border-right: 1px solid #d0d9e6; background: #f8fbff; padding: 16px; overflow: auto; }
+    .main { padding: 20px; }
+    h1 { margin: 0 0 6px; font-size: 20px; }
+    .muted { color: #52617d; font-size: 13px; margin-bottom: 12px; }
+    .story-list { display: grid; gap: 8px; }
+    .story-btn { text-align: left; border: 1px solid #cad5e5; background: #fff; border-radius: 10px; padding: 10px; cursor: pointer; }
+    .story-btn:hover { background: #f2f7ff; }
+    .story-btn.active { border-color: #0f62fe; box-shadow: 0 0 0 2px rgba(15,98,254,.14); }
+    .story-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+    .story-desc { font-size: 12px; color: #5f6f8e; }
+    .header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .panel { background: #fff; border: 1px solid #d4deec; border-radius: 14px; box-shadow: 0 4px 22px rgba(15, 32, 58, .06); padding: 14px; }
+    .actions { display: flex; gap: 8px; }
+    .actions button { border: 1px solid #cad5e5; background: #fff; border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+    .actions button:hover { background: #f5f8ff; }
+    #stage { min-height: 540px; }
+    #status { margin-top: 10px; font-size: 13px; color: #4f5e7d; }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      .sidebar { border-right: 0; border-bottom: 1px solid #d0d9e6; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h1>Stories</h1>
+      <div class="muted">10 interaktive Storybook-Style Demos</div>
+      <div id="storyList" class="story-list"></div>
+    </aside>
+    <main class="main">
+      <div class="header">
+        <div>
+          <h1 id="storyTitle">Loading...</h1>
+          <div id="storyDesc" class="muted"></div>
+        </div>
+        <div class="actions">
+          <button id="reloadBtn">Reload Story</button>
+          <button id="openDefaultDemoBtn">Open demo/index.html</button>
+        </div>
+      </div>
+      <section class="panel">
+        <div id="stage"></div>
+        <div id="status"></div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module">
+    import { stories } from './stories.js';
+
+    const storyListEl = document.getElementById('storyList');
+    const stageEl = document.getElementById('stage');
+    const statusEl = document.getElementById('status');
+    const storyTitleEl = document.getElementById('storyTitle');
+    const storyDescEl = document.getElementById('storyDesc');
+    const reloadBtn = document.getElementById('reloadBtn');
+    const openDefaultDemoBtn = document.getElementById('openDefaultDemoBtn');
+
+    let currentIndex = 0;
+    let currentPlayer = null;
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function renderStoryButtons() {
+      storyListEl.innerHTML = '';
+      stories.forEach((story, idx) => {
+        const btn = document.createElement('button');
+        btn.className = `story-btn${idx === currentIndex ? ' active' : ''}`;
+        btn.innerHTML = `<div class="story-title">${story.title}</div><div class="story-desc">${story.description}</div>`;
+        btn.addEventListener('click', () => runStory(idx));
+        storyListEl.appendChild(btn);
+      });
+    }
+
+    async function runStory(index) {
+      currentIndex = index;
+      renderStoryButtons();
+      const story = stories[index];
+      storyTitleEl.textContent = story.title;
+      storyDescEl.textContent = story.description;
+      setStatus('Loading story...');
+
+      if (currentPlayer) {
+        currentPlayer.destroy();
+        currentPlayer = null;
+      }
+      stageEl.innerHTML = '';
+
+      try {
+        currentPlayer = await story.run(stageEl);
+        setStatus(`Running: ${story.title}`);
+      } catch (err) {
+        console.error(err);
+        setStatus(`Story failed: ${err.message || err}`);
+      }
+    }
+
+    reloadBtn.addEventListener('click', () => runStory(currentIndex));
+    openDefaultDemoBtn.addEventListener('click', () => {
+      window.location.href = './index.html';
+    });
+
+    runStory(0);
+  </script>
+</body>
+</html>

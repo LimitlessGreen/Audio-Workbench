@@ -150,7 +150,23 @@ player.play(): void
 player.pause(): void
 player.stop(): void
 player.togglePlayPause(): void
+player.playBandpassedSegment(startSec: number, endSec: number, freqMinHz: number, freqMaxHz: number): void
 player.destroy(): void
+```
+
+## Debug Performance Overlay
+
+Aktiviere das Laufzeit-Overlay mit:
+
+- URL: `?perf=1` (z. B. `demo/index.html?perf=1`)
+- oder Option: `new BirdNETPlayer(el, { enablePerfOverlay: true })`
+
+Das Overlay zeigt u. a. FPS, Long-Frames, Eventraten und Transport-State-Transitions.
+
+## Tests
+
+```bash
+npm test
 ```
 
 ## Build / Sync from parent project
@@ -160,6 +176,17 @@ cd audio-workbench-player-lib
 bash scripts/build.sh
 npm pack
 ```
+
+## Storybook-Style Demo
+
+```bash
+cd audio-workbench-player-lib
+python -m http.server 8080
+```
+
+Dann öffnen:
+- `http://localhost:8080/demo/storybook.html` (10 interaktive Stories)
+- `http://localhost:8080/demo/index.html` (Standard-Demo)
 
 ## Publish
 

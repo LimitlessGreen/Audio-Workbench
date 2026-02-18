@@ -1,4 +1,4 @@
-// src/player/template.js
+// src/template.js
 var DEFAULT_OPTIONS = {
   showFileOpen: true,
   // Open-button + file input
@@ -57,7 +57,7 @@ function createPlayerHTML(opts = {}) {
         </div>
 
         <!-- Time -->
-        <div class="time-display" id="timeDisplay"${hide(o.showTime)}>
+        <div class="time-display" id="timeDisplay" role="status" aria-live="polite"${hide(o.showTime)}>
             <span id="currentTime">00:00.0</span><span class="time-sep">/</span><span id="totalTime">00:00.0</span>
         </div>
 
@@ -167,7 +167,14 @@ function createPlayerHTML(opts = {}) {
                     <div class="frequency-labels" id="freqLabels"></div>
                 </div>
                 <div class="time-pane">
-                    <div class="canvas-wrapper" id="canvasWrapper">
+                    <div class="canvas-wrapper" id="canvasWrapper"
+                         role="slider"
+                         aria-label="Playback position"
+                         aria-valuemin="0"
+                         aria-valuemax="0"
+                         aria-valuenow="0"
+                         aria-valuetext="00:00.0 of 00:00.0"
+                         tabindex="0">
                         <canvas id="spectrogramCanvas"></canvas>
                         <div class="playhead" id="playhead"></div>
                     </div>
@@ -205,7 +212,7 @@ function createPlayerHTML(opts = {}) {
 </div>`;
 }
 
-// src/player/constants.js
+// src/constants.js
 var DEFAULT_ZOOM_PPS = 100;
 var DEFAULT_WAVEFORM_HEIGHT = 100;
 var DEFAULT_SPECTROGRAM_DISPLAY_HEIGHT = DEFAULT_WAVEFORM_HEIGHT * 2;
@@ -216,6 +223,8 @@ var SEEK_COARSE_SEC = 5;
 var SPECTROGRAM_HEIGHT = 512;
 var MAX_BASE_SPECTROGRAM_WIDTH = 24e3;
 var MIN_WINDOW_NORM = 0.02;
+var PROGRESSIVE_CHUNK_SECONDS = 10;
+var PROGRESSIVE_MIN_DURATION_SEC = 60;
 var PERCH_FRAME_RATE = 100;
 var PERCH_N_MELS = 160;
 var PERCH_PCEN_GAIN = 0.8;
@@ -223,7 +232,7 @@ var PERCH_PCEN_BIAS = 0.01;
 var PERCH_PCEN_ROOT = 4;
 var PERCH_PCEN_SMOOTHING = 0.025;
 
-// src/player/utils.js
+// src/utils.js
 function formatTime(seconds) {
   const mins = Math.floor(seconds / 60);
   const secs = (seconds % 60).toFixed(1);
@@ -241,7 +250,179 @@ function getTimeGridSteps(pixelsPerSecond) {
   return { majorStep, minorStep: majorStep / 2 };
 }
 
-// src/player/spectrogram.js
+// src/gestures.js
+function distance(a, b) {
+  const dx = a.clientX - b.clientX;
+  const dy = a.clientY - b.clientY;
+  return Math.hypot(dx, dy);
+}
+function midpoint(a, b) {
+  return {
+    x: (a.clientX + b.clientX) * 0.5,
+    y: (a.clientY + b.clientY) * 0.5
+  };
+}
+var GestureRecognizer = class {
+  constructor(element) {
+    this.element = element;
+    this.handlers = /* @__PURE__ */ new Map();
+    this.cleanups = [];
+    this.lastTapTime = 0;
+    this.lastTapX = 0;
+    this.lastTapY = 0;
+    this.touchMode = null;
+    this.swipeStartX = 0;
+    this.swipeStartY = 0;
+    this.swipeLastX = 0;
+    this.swipeLastY = 0;
+    this.lastPinchDistance = 0;
+    this.lastPinchCenter = null;
+    this._bind();
+  }
+  on(event, callback) {
+    const arr = this.handlers.get(event) || [];
+    arr.push(callback);
+    this.handlers.set(event, arr);
+    return () => this.off(event, callback);
+  }
+  off(event, callback) {
+    const arr = this.handlers.get(event);
+    if (!arr) return;
+    this.handlers.set(event, arr.filter((cb) => cb !== callback));
+  }
+  emit(event, detail) {
+    const arr = this.handlers.get(event);
+    if (!arr) return;
+    for (const cb of arr) cb(detail);
+  }
+  dispose() {
+    for (const cleanup of this.cleanups) cleanup();
+    this.cleanups.length = 0;
+    this.handlers.clear();
+  }
+  _bind() {
+    const on = (name, fn, options = { passive: false }) => {
+      this.element.addEventListener(name, fn, options);
+      this.cleanups.push(() => this.element.removeEventListener(name, fn, options));
+    };
+    on("touchstart", (e) => this._onTouchStart(e));
+    on("touchmove", (e) => this._onTouchMove(e));
+    on("touchend", (e) => this._onTouchEnd(e));
+    on("touchcancel", () => this._reset());
+  }
+  _onTouchStart(e) {
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      this.touchMode = "swipe";
+      this.swipeStartX = t.clientX;
+      this.swipeStartY = t.clientY;
+      this.swipeLastX = t.clientX;
+      this.swipeLastY = t.clientY;
+      return;
+    }
+    if (e.touches.length >= 2) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      this.touchMode = "pinch";
+      this.lastPinchDistance = distance(a, b);
+      this.lastPinchCenter = midpoint(a, b);
+      e.preventDefault();
+    }
+  }
+  _onTouchMove(e) {
+    if (this.touchMode === "pinch" && e.touches.length >= 2) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const d = Math.max(1, distance(a, b));
+      const center = midpoint(a, b);
+      const scale = d / Math.max(1, this.lastPinchDistance);
+      this.lastPinchDistance = d;
+      this.lastPinchCenter = center;
+      this.emit("pinch", { scale, centerX: center.x, centerY: center.y });
+      e.preventDefault();
+      return;
+    }
+    if (this.touchMode === "swipe" && e.touches.length === 1) {
+      this.swipeLastX = e.touches[0].clientX;
+      this.swipeLastY = e.touches[0].clientY;
+    }
+  }
+  _onTouchEnd(e) {
+    if (this.touchMode === "pinch") {
+      if (e.touches.length < 2) this._reset();
+      return;
+    }
+    if (this.touchMode === "swipe" && e.touches.length === 0) {
+      const dx = this.swipeLastX - this.swipeStartX;
+      const dy = Math.abs(this.swipeLastY - this.swipeStartY);
+      if (Math.abs(dx) > 24 && dy < 48) {
+        this.emit("swipe", { dx });
+      } else {
+        const now = performance.now();
+        const withinTime = now - this.lastTapTime < 280;
+        const nearLast = Math.hypot(this.swipeStartX - this.lastTapX, this.swipeStartY - this.lastTapY) < 24;
+        if (withinTime && nearLast) {
+          this.emit("doubletap", { x: this.swipeStartX, y: this.swipeStartY });
+          this.lastTapTime = 0;
+        } else {
+          this.lastTapTime = now;
+          this.lastTapX = this.swipeStartX;
+          this.lastTapY = this.swipeStartY;
+        }
+      }
+    }
+    this._reset();
+  }
+  _reset() {
+    this.touchMode = null;
+    this.swipeStartX = 0;
+    this.swipeStartY = 0;
+    this.swipeLastX = 0;
+    this.swipeLastY = 0;
+    this.lastPinchDistance = 0;
+    this.lastPinchCenter = null;
+  }
+};
+
+// src/transportState.js
+var TRANSPORT_STATE_LABELS = {
+  idle: "Idle",
+  loading: "Loading",
+  ready: "Ready",
+  rendering: "Rendering...",
+  playing: "Playing",
+  playing_loop: "Playing (Loop)",
+  playing_segment: "Playing (Segment)",
+  paused: "Paused",
+  paused_segment: "Paused (Segment)",
+  stopped: "Stopped",
+  error: "Error"
+};
+var ALLOWED_TRANSITIONS = {
+  "": /* @__PURE__ */ new Set(["idle", "loading", "ready", "error"]),
+  idle: /* @__PURE__ */ new Set(["loading", "ready", "error"]),
+  loading: /* @__PURE__ */ new Set(["ready", "error", "idle"]),
+  ready: /* @__PURE__ */ new Set(["rendering", "playing", "playing_loop", "playing_segment", "paused", "stopped", "loading", "error"]),
+  rendering: /* @__PURE__ */ new Set(["ready", "error", "loading"]),
+  playing: /* @__PURE__ */ new Set(["paused", "stopped", "playing_loop", "playing_segment", "ready"]),
+  playing_loop: /* @__PURE__ */ new Set(["paused", "stopped", "playing", "ready"]),
+  playing_segment: /* @__PURE__ */ new Set(["paused_segment", "stopped", "ready"]),
+  paused: /* @__PURE__ */ new Set(["playing", "playing_loop", "stopped", "ready", "loading"]),
+  paused_segment: /* @__PURE__ */ new Set(["playing_segment", "stopped", "ready", "paused"]),
+  stopped: /* @__PURE__ */ new Set(["playing", "playing_loop", "playing_segment", "ready", "loading"]),
+  error: /* @__PURE__ */ new Set(["loading", "idle", "ready"])
+};
+function canTransitionTransportState(fromState, toState) {
+  if (!toState) return false;
+  if (fromState === toState) return true;
+  const allowed = ALLOWED_TRANSITIONS[fromState] || ALLOWED_TRANSITIONS[""];
+  return allowed.has(toState);
+}
+
+// src/spectrogram.js
+var CACHE_DB_NAME = "audio-workbench-player-cache";
+var CACHE_DB_VERSION = 1;
+var CACHE_STORE = "spectrograms";
 function computeAmplitudePeak(channelData) {
   let peak = 0;
   for (let i = 0; i < channelData.length; i++) {
@@ -978,6 +1159,85 @@ function renderSpectrogram({
   );
   drawTimeGrid({ ctx, width, height, duration, pixelsPerSecond });
 }
+function openSpectrogramCacheDb() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("indexedDB unavailable"));
+      return;
+    }
+    const req = indexedDB.open(CACHE_DB_NAME, CACHE_DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(CACHE_STORE)) {
+        db.createObjectStore(CACHE_STORE, { keyPath: "cacheKey" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("Failed to open cache DB"));
+  });
+}
+async function sha256ArrayBuffer(arrayBuffer) {
+  if (!globalThis.crypto?.subtle) {
+    throw new Error("crypto.subtle unavailable");
+  }
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", arrayBuffer);
+  const bytes = new Uint8Array(digest);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, "0");
+  return out;
+}
+function buildSpectrogramCacheKey({
+  fileHash,
+  fftSize,
+  sampleRate,
+  frameRate,
+  nMels,
+  pcenGain,
+  pcenBias,
+  pcenRoot,
+  pcenSmoothing
+}) {
+  return [
+    fileHash,
+    `fft=${fftSize}`,
+    `sr=${sampleRate}`,
+    `fr=${frameRate}`,
+    `mels=${nMels}`,
+    `g=${pcenGain}`,
+    `b=${pcenBias}`,
+    `r=${pcenRoot}`,
+    `s=${pcenSmoothing}`
+  ].join("|");
+}
+async function getSpectrogramCacheEntry(cacheKey) {
+  try {
+    const db = await openSpectrogramCacheDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(CACHE_STORE, "readonly");
+      const store = tx.objectStore(CACHE_STORE);
+      const req = store.get(cacheKey);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error || new Error("Cache read failed"));
+    });
+  } catch {
+    return null;
+  }
+}
+async function putSpectrogramCacheEntry(entry) {
+  try {
+    const db = await openSpectrogramCacheDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(CACHE_STORE, "readwrite");
+      const store = tx.objectStore(CACHE_STORE);
+      store.put(entry);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error("Cache write failed"));
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 var WORKER_CODE = `
 self.onmessage = (event) => {
     const {
@@ -1334,6 +1594,24 @@ function createSpectrogramProcessor() {
       return computeMainThread(channelData, options);
     }
   };
+  const computeProgressive = async function* (channelData, options) {
+    const sampleRate = Math.max(1, options.sampleRate || 0);
+    const chunkSeconds = Math.max(1, options.chunkSeconds || 10);
+    const samplesPerChunk = Math.max(1, Math.floor(chunkSeconds * sampleRate));
+    const totalChunks = Math.max(1, Math.ceil(channelData.length / samplesPerChunk));
+    for (let chunk = 0; chunk < totalChunks; chunk++) {
+      const startSample = chunk * samplesPerChunk;
+      const endSample = Math.min(channelData.length, startSample + samplesPerChunk);
+      const chunkData = channelData.subarray(startSample, endSample);
+      const result = await compute(chunkData, options);
+      yield {
+        chunk,
+        totalChunks,
+        percent: (chunk + 1) / totalChunks * 100,
+        result
+      };
+    }
+  };
   const dispose = () => {
     if (worker) {
       worker.terminate();
@@ -1341,10 +1619,10 @@ function createSpectrogramProcessor() {
     }
     pendingRequests.clear();
   };
-  return { compute, dispose };
+  return { compute, computeProgressive, dispose };
 }
 
-// src/player/waveform.js
+// src/waveform.js
 function drawWaveformTimeline({ ctx, width, height, duration, pixelsPerSecond }) {
   if (width <= 0) return;
   const css = getComputedStyle(document.documentElement);
@@ -1496,7 +1774,7 @@ function renderFrequencyLabels({ labelsElement, maxFreq, sampleRateHz }) {
   });
 }
 
-// src/player/PlayerState.js
+// src/PlayerState.js
 async function decodeArrayBuffer(arrayBuffer) {
   const Ctor = window.AudioContext || window.webkitAudioContext;
   if (!Ctor) throw new Error("AudioContext wird von diesem Browser nicht unterst\xFCtzt.");
@@ -1509,12 +1787,14 @@ async function decodeArrayBuffer(arrayBuffer) {
   }
 }
 var PlayerState = class {
-  constructor(container, WaveSurfer) {
+  constructor(container, WaveSurfer, emitHostEvent = null, options = {}) {
     if (!container) throw new Error("PlayerState: container element required");
     if (!WaveSurfer) throw new Error("PlayerState: WaveSurfer reference required");
     this.container = container;
     this.d = this._queryDom(container);
     this.WaveSurfer = WaveSurfer;
+    this._emitHostEvent = typeof emitHostEvent === "function" ? emitHostEvent : null;
+    this.options = options || {};
     this.processor = createSpectrogramProcessor();
     this.colorizer = new GpuColorizer();
     this.audioBuffer = null;
@@ -1528,6 +1808,7 @@ var PlayerState = class {
     this.spectrogramAbsLogMin = 0;
     this.spectrogramAbsLogMax = 1;
     this.sampleRateHz = 32e3;
+    this.audioHash = null;
     this.amplitudePeakAbs = 1;
     this.currentColorScheme = this.d.colorSchemeSelect.value || "fire";
     this.volume = 0.8;
@@ -1540,12 +1821,48 @@ var PlayerState = class {
     this.windowEndNorm = 1;
     this.followPlayback = true;
     this.loopPlayback = false;
+    this.playbackMode = "normal";
+    this.transportState = "";
+    this._activeSegmentLabelId = null;
+    this._activeSegmentFilter = null;
+    this._activeSegmentStart = null;
+    this._activeSegmentEnd = null;
+    this._suppressNextPauseHandler = false;
+    this._segmentPlayToken = 0;
+    this._customSegmentPlayback = null;
+    this._lastTimeupdateEmitAt = 0;
+    this._lastSelectionEmitAt = 0;
+    this._lastSelectionStart = NaN;
+    this._lastSelectionEnd = NaN;
+    this._lastViewRangeTextStart = NaN;
+    this._lastViewRangeTextEnd = NaN;
+    this._lastTimeReadoutText = "";
+    this._uiFrameId = 0;
+    this._uiPending = null;
+    this._perf = {
+      enabled: false,
+      panel: null,
+      intervalId: 0,
+      frames: 0,
+      fps: 0,
+      lastFrameTs: 0,
+      longFrames: 0,
+      maxFrameMs: 0,
+      uiFlushes: 0,
+      timeupdateEvents: 0,
+      selectionEvents: 0,
+      seekEvents: 0,
+      transitionEvents: 0,
+      blockedTransitions: 0,
+      lastTransition: ""
+    };
     this.draggingPlayhead = false;
     this.draggingPlayheadSource = null;
     this.draggingViewport = false;
     this.viewportPanStartX = 0;
     this.viewportPanStartScroll = 0;
     this.suppressSeekClick = false;
+    this._blockSeekClickUntil = 0;
     this.overviewMode = null;
     this.overviewDragStartX = 0;
     this.overviewDragStart = 0;
@@ -1556,12 +1873,141 @@ var PlayerState = class {
     this.viewResizeStartY = 0;
     this.viewResizeStartWaveformHeight = DEFAULT_WAVEFORM_HEIGHT;
     this.viewResizeStartSpectrogramHeight = DEFAULT_SPECTROGRAM_DISPLAY_HEIGHT;
+    this._viewResizeFrameId = 0;
+    this._viewResizeNeedsWaveformRedraw = false;
+    this._viewResizeNeedsSpectrogramRedraw = false;
     this._applyLocalViewHeights();
     this._updateAmplitudeLabels();
     this._setInitialPlayheadPositions();
     this._updateToggleButtons();
+    this._updateAriaPlaybackPosition(0);
+    this._setTransportState("idle", "init");
+    this._initPerfOverlay();
     this._cleanups = [];
     this._bindEvents();
+    if (this.options.enableTouchGestures !== false) {
+      this._bindTouchGestures();
+    }
+  }
+  _emit(event, detail = {}) {
+    if (!this._emitHostEvent) return;
+    this._emitHostEvent(event, detail);
+  }
+  _initPerfOverlay() {
+    const byOption = this.options?.enablePerfOverlay === true;
+    let byQuery = false;
+    try {
+      const params = new URLSearchParams(window.location.search || "");
+      byQuery = params.get("perf") === "1";
+    } catch {
+      byQuery = false;
+    }
+    if (!byOption && !byQuery) return;
+    this._perf.enabled = true;
+    const panel = document.createElement("div");
+    panel.className = "abp-perf-overlay";
+    panel.innerHTML = `
+            <div class="abp-perf-title">PERF</div>
+            <div class="abp-perf-body">Initializing...</div>
+        `;
+    this.container.appendChild(panel);
+    this._perf.panel = panel;
+    this._perf.intervalId = window.setInterval(() => {
+      this._renderPerfOverlay();
+    }, 500);
+  }
+  _perfOnFrame(ts) {
+    if (!this._perf.enabled) return;
+    this._perf.frames += 1;
+    if (this._perf.lastFrameTs > 0) {
+      const frameMs = ts - this._perf.lastFrameTs;
+      if (frameMs > 0) {
+        const fps = 1e3 / frameMs;
+        this._perf.fps = this._perf.fps <= 0 ? fps : this._perf.fps * 0.85 + fps * 0.15;
+      }
+      this._perf.maxFrameMs = Math.max(this._perf.maxFrameMs, frameMs);
+      if (frameMs > 32) this._perf.longFrames += 1;
+    }
+    this._perf.lastFrameTs = ts;
+  }
+  _renderPerfOverlay() {
+    if (!this._perf.enabled || !this._perf.panel) return;
+    const body = this._perf.panel.querySelector(".abp-perf-body");
+    if (!body) return;
+    body.innerHTML = [
+      `state: ${this.transportState || "n/a"}`,
+      `fps: ${this._perf.fps.toFixed(1)} | long>${32}ms: ${this._perf.longFrames}`,
+      `max frame: ${this._perf.maxFrameMs.toFixed(1)}ms | ui flushes: ${this._perf.uiFlushes}`,
+      `timeupdate: ${this._perf.timeupdateEvents} | selection: ${this._perf.selectionEvents} | seek: ${this._perf.seekEvents}`,
+      `transitions: ${this._perf.transitionEvents} | blocked: ${this._perf.blockedTransitions}`,
+      `last: ${this._perf.lastTransition || "-"}`
+    ].join("<br>");
+    this._perf.uiFlushes = 0;
+    this._perf.timeupdateEvents = 0;
+    this._perf.selectionEvents = 0;
+    this._perf.seekEvents = 0;
+    this._perf.maxFrameMs = 0;
+  }
+  _setTransportState(nextState, reason = "") {
+    if (!nextState || this.transportState === nextState) return;
+    const fromState = this.transportState || "";
+    if (!canTransitionTransportState(fromState, nextState)) {
+      this._perf.blockedTransitions += 1;
+      this._emit("transporttransitionblocked", { from: fromState, to: nextState, reason });
+    }
+    this.transportState = nextState;
+    this._perf.transitionEvents += 1;
+    this._perf.lastTransition = `${fromState || "\u2205"} \u2192 ${nextState}${reason ? ` (${reason})` : ""}`;
+    this._setPlayState(TRANSPORT_STATE_LABELS[nextState] || nextState);
+    this._emit("transportstatechange", { state: nextState, reason });
+  }
+  _scheduleUiUpdate({
+    time = this._getCurrentTime(),
+    fromPlayback = false,
+    centerView = false,
+    emitSeek = false,
+    immediate = false
+  } = {}) {
+    this._uiPending = this._uiPending || {
+      time: 0,
+      fromPlayback: false,
+      centerView: false,
+      emitSeek: false
+    };
+    this._uiPending.time = time;
+    this._uiPending.fromPlayback = fromPlayback;
+    this._uiPending.centerView = this._uiPending.centerView || centerView;
+    this._uiPending.emitSeek = this._uiPending.emitSeek || emitSeek;
+    if (immediate) {
+      if (this._uiFrameId) {
+        cancelAnimationFrame(this._uiFrameId);
+        this._uiFrameId = 0;
+      }
+      this._flushUiUpdate(performance.now());
+      return;
+    }
+    if (this._uiFrameId) return;
+    this._uiFrameId = requestAnimationFrame((ts) => this._flushUiUpdate(ts));
+  }
+  _flushUiUpdate(_ts) {
+    this._uiFrameId = 0;
+    const pending = this._uiPending;
+    this._uiPending = null;
+    if (!pending || !this.audioBuffer) return;
+    this._perfOnFrame(_ts);
+    this._perf.uiFlushes += 1;
+    const duration = Math.max(0, this.audioBuffer.duration || 0);
+    const t = Math.max(0, Math.min(pending.time || 0, duration || pending.time || 0));
+    this._updateTimeReadout(t);
+    this._updatePlayhead(t, pending.fromPlayback);
+    if (pending.centerView) this._centerViewportAtTime(t);
+    if (pending.emitSeek) {
+      this._perf.seekEvents += 1;
+      this._emit("seek", {
+        currentTime: t,
+        duration: this.audioBuffer?.duration || 0
+      });
+    }
   }
   // ═════════════════════════════════════════════════════════════════
   //  DOM Query (scoped to container)
@@ -1626,6 +2072,23 @@ var PlayerState = class {
   //  Disposal
   // ═════════════════════════════════════════════════════════════════
   dispose() {
+    this._stopCustomSegmentPlayback("stopped", this._getCurrentTime());
+    if (this._viewResizeFrameId) {
+      cancelAnimationFrame(this._viewResizeFrameId);
+      this._viewResizeFrameId = 0;
+    }
+    if (this._uiFrameId) {
+      cancelAnimationFrame(this._uiFrameId);
+      this._uiFrameId = 0;
+    }
+    if (this._perf.intervalId) {
+      clearInterval(this._perf.intervalId);
+      this._perf.intervalId = 0;
+    }
+    if (this._perf.panel?.parentNode) {
+      this._perf.panel.parentNode.removeChild(this._perf.panel);
+      this._perf.panel = null;
+    }
     for (let i = this._cleanups.length - 1; i >= 0; i--) this._cleanups[i]();
     this._cleanups.length = 0;
     this.processor.dispose();
@@ -1639,11 +2102,13 @@ var PlayerState = class {
     if (!file) return;
     this.d.fileInfo.innerHTML = `<span class="statusbar-label">${file.name}</span>`;
     this.d.fileInfo.classList.add("loading");
-    this._setPlayState("Loading");
+    this._setTransportState("loading", "file-load");
     try {
-      const audioBuffer = await decodeArrayBuffer(await file.arrayBuffer());
+      const fileBuffer = await file.arrayBuffer();
+      const audioBuffer = await decodeArrayBuffer(fileBuffer);
       this.audioBuffer = audioBuffer;
       this.sampleRateHz = audioBuffer.sampleRate;
+      this.audioHash = await sha256ArrayBuffer(fileBuffer).catch(() => null);
       this.amplitudePeakAbs = computeAmplitudePeak(audioBuffer.getChannelData(0));
       this._updateAmplitudeLabels();
       this.d.fileInfo.innerHTML = `<span class="statusbar-label">${file.name}</span> <span>${formatTime(audioBuffer.duration)}</span>`;
@@ -1653,7 +2118,7 @@ var PlayerState = class {
       this._setPixelsPerSecond(DEFAULT_ZOOM_PPS, false);
       this._setTransportEnabled(true);
       this._updateToggleButtons();
-      this._setPlayState("Ready");
+      this._setTransportState("ready", "file-loaded");
       this.d.fileInfo.classList.remove("loading");
       this._setupWaveSurfer(file);
       await this._generateSpectrogram();
@@ -1663,8 +2128,9 @@ var PlayerState = class {
       this._seekToTime(0, true);
     } catch (error) {
       console.error("Fehler beim Laden der Datei:", error);
-      this._setPlayState("Error");
+      this._setTransportState("error", "file-load-failed");
       this.d.fileInfo.classList.remove("loading");
+      this._emit("error", { message: error?.message || String(error), source: "file" });
       alert("Fehler beim Laden der Audio-Datei");
     }
   }
@@ -1674,7 +2140,7 @@ var PlayerState = class {
   async loadUrl(url) {
     this.d.fileInfo.innerHTML = `<span class="statusbar-label">Loading\u2026</span>`;
     this.d.fileInfo.classList.add("loading");
-    this._setPlayState("Loading");
+    this._setTransportState("loading", "url-load");
     try {
       const response = await fetch(url);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1682,6 +2148,7 @@ var PlayerState = class {
       const audioBuffer = await decodeArrayBuffer(arrayBuffer);
       this.audioBuffer = audioBuffer;
       this.sampleRateHz = audioBuffer.sampleRate;
+      this.audioHash = await sha256ArrayBuffer(arrayBuffer).catch(() => null);
       this.amplitudePeakAbs = computeAmplitudePeak(audioBuffer.getChannelData(0));
       this._updateAmplitudeLabels();
       const name = decodeURIComponent(
@@ -1694,7 +2161,7 @@ var PlayerState = class {
       this._setPixelsPerSecond(DEFAULT_ZOOM_PPS, false);
       this._setTransportEnabled(true);
       this._updateToggleButtons();
-      this._setPlayState("Ready");
+      this._setTransportState("ready", "url-loaded");
       this.d.fileInfo.classList.remove("loading");
       this._setupWaveSurfer(url);
       await this._generateSpectrogram();
@@ -1704,8 +2171,9 @@ var PlayerState = class {
       this._seekToTime(0, true);
     } catch (error) {
       console.error("Error loading audio URL:", error);
-      this._setPlayState("Error");
+      this._setTransportState("error", "url-load-failed");
       this.d.fileInfo.classList.remove("loading");
+      this._emit("error", { message: error?.message || String(error), source: "url" });
     }
   }
   // ═════════════════════════════════════════════════════════════════
@@ -1733,33 +2201,63 @@ var PlayerState = class {
       ws.zoom(this.pixelsPerSecond);
       ws.setVolume(this.volume);
       this._seekToTime(0, true);
+      this._lastTimeupdateEmitAt = 0;
+      this._lastSelectionEmitAt = 0;
+      this._lastSelectionStart = NaN;
+      this._lastSelectionEnd = NaN;
     });
     ws.on("timeupdate", (t) => {
-      this._updateTimeReadout(t);
-      this._updatePlayhead(t, true);
+      this._perf.timeupdateEvents += 1;
+      this._scheduleUiUpdate({ time: t, fromPlayback: true });
+      const now = performance.now();
+      if (now - this._lastTimeupdateEmitAt >= 66) {
+        this._lastTimeupdateEmitAt = now;
+        this._emit("timeupdate", {
+          currentTime: t,
+          duration: this.audioBuffer?.duration || 0
+        });
+      }
     });
     ws.on("play", () => {
       this.d.playPauseBtn.classList.add("playing");
-      this._setPlayState(this.loopPlayback ? "Playing (Loop)" : "Playing");
+      if (this.playbackMode === "segment") {
+        this._setTransportState("playing_segment", "engine-play");
+        return;
+      }
+      this._setTransportState(this.loopPlayback ? "playing_loop" : "playing", "engine-play");
     });
     ws.on("pause", () => {
+      if (this._suppressNextPauseHandler) {
+        this._suppressNextPauseHandler = false;
+        return;
+      }
       this.d.playPauseBtn.classList.remove("playing");
-      if (this.audioBuffer) {
+      if (this.playbackMode === "segment" && this._activeSegmentEnd != null) {
+        this._setTransportState("paused_segment", "engine-pause");
+      } else if (this.audioBuffer) {
         const atEnd = ws.getCurrentTime() >= this.audioBuffer.duration - 0.01;
-        this._setPlayState(atEnd ? "Stopped" : "Paused");
+        this._setTransportState(atEnd ? "stopped" : "paused", "engine-pause");
       } else {
-        this._setPlayState("Paused");
+        this._setTransportState("paused", "engine-pause");
       }
     });
     ws.on("finish", () => {
+      if (this.playbackMode === "segment") {
+        this.playbackMode = "normal";
+        this._activeSegmentLabelId = null;
+        this._activeSegmentFilter = null;
+        this._activeSegmentStart = null;
+        this._activeSegmentEnd = null;
+        this._segmentPlayToken++;
+      }
       if (this.loopPlayback) {
         this._seekToTime(0, this.followPlayback);
         ws.play();
         return;
       }
       this.d.playPauseBtn.classList.remove("playing");
-      this._setPlayState("Stopped");
-      if (this.audioBuffer) this._updatePlayhead(this.audioBuffer.duration, false);
+      this._setTransportState("stopped", "engine-finish");
+      if (this.audioBuffer) this._scheduleUiUpdate({ time: this.audioBuffer.duration, fromPlayback: false, immediate: true });
     });
     this.wavesurfer = ws;
   }
@@ -1767,32 +2265,356 @@ var PlayerState = class {
   //  Transport Controls
   // ═════════════════════════════════════════════════════════════════
   _togglePlayPause() {
+    if (this._customSegmentPlayback) {
+      this._stopCustomSegmentPlayback("paused", this._customSegmentPlayback.currentTimeSec);
+      return;
+    }
+    this.playbackMode = "normal";
+    this._activeSegmentLabelId = null;
+    this._activeSegmentFilter = null;
+    this._activeSegmentStart = null;
+    this._activeSegmentEnd = null;
+    this._segmentPlayToken++;
     if (this.wavesurfer && this.audioBuffer) this.wavesurfer.playPause();
   }
   _stopPlayback() {
+    if (this._customSegmentPlayback) {
+      this._stopCustomSegmentPlayback("stopped", 0);
+    }
     if (!this.wavesurfer) return;
+    this.playbackMode = "normal";
+    this._activeSegmentLabelId = null;
+    this._activeSegmentFilter = null;
+    this._activeSegmentStart = null;
+    this._activeSegmentEnd = null;
+    this._segmentPlayToken++;
     this.wavesurfer.pause();
     this._seekToTime(0, true);
-    this._setPlayState("Stopped");
+    this._setTransportState("stopped", "stop-control");
     this.d.playPauseBtn.classList.remove("playing");
   }
-  _seekToTime(timeSec, centerView = false) {
+  playSegment(startSec, endSec, options = {}) {
+    if (!this.audioBuffer || !this.wavesurfer) return;
+    this._clearPlaybackFilter();
+    const dur = this.audioBuffer.duration;
+    const start = Math.max(0, Math.min(startSec, dur));
+    const end = Math.max(0, Math.min(endSec, dur));
+    if (end - start < 0.01) return;
+    const token = ++this._segmentPlayToken;
+    this.playbackMode = "segment";
+    this._activeSegmentLabelId = options?.labelId || null;
+    this._activeSegmentFilter = null;
+    this._activeSegmentStart = start;
+    this._activeSegmentEnd = end;
+    if (this.wavesurfer.isPlaying()) {
+      this._suppressNextPauseHandler = true;
+      this.wavesurfer.pause();
+    }
+    this._seekToTime(start, false);
+    if (token !== this._segmentPlayToken) return;
+    const runPlay = () => {
+      if (token !== this._segmentPlayToken) return;
+      try {
+        if (this.loopPlayback) {
+          this._seekToTime(start, false, { allowCustomPlayback: true });
+          this.wavesurfer.play();
+          this._emit("segmentplaystart", { start, end, loop: true });
+          return;
+        }
+        const maybePromise = this.wavesurfer.play(start, end);
+        this._emit("segmentplaystart", { start, end });
+        if (maybePromise && typeof maybePromise.then === "function") {
+          maybePromise.catch(() => {
+            if (token !== this._segmentPlayToken) return;
+            this._seekToTime(start, false);
+            this.wavesurfer?.play();
+          });
+        }
+      } catch {
+        if (token !== this._segmentPlayToken) return;
+        this._seekToTime(start, false);
+        this.wavesurfer?.play();
+        this._emit("segmentplaystart", { start, end });
+      }
+    };
+    try {
+      window.requestAnimationFrame(runPlay);
+    } catch {
+      runPlay();
+    }
+  }
+  playBandpassedSegment(startSec, endSec, freqMinHz, freqMaxHz, options = {}) {
     if (!this.audioBuffer) return;
+    const dur = this.audioBuffer.duration;
+    const start = Math.max(0, Math.min(startSec, dur));
+    const end = Math.max(0, Math.min(endSec, dur));
+    if (end - start < 0.01) return;
+    const nyquist = Math.max(100, this.audioBuffer.sampleRate * 0.5 - 10);
+    const fLo = Math.max(20, Math.min(freqMinHz, freqMaxHz, nyquist - 5));
+    const fHi = Math.max(fLo + 5, Math.min(Math.max(freqMinHz, freqMaxHz), nyquist));
+    const center = Math.sqrt(fLo * fHi);
+    const bandwidth = Math.max(10, fHi - fLo);
+    const q = Math.max(0.25, Math.min(40, center / bandwidth));
+    this._stopCustomSegmentPlayback("stopped", start);
+    this._clearPlaybackFilter();
+    if (this.wavesurfer?.isPlaying()) {
+      this._suppressNextPauseHandler = true;
+      this.wavesurfer.pause();
+    }
+    this._seekToTime(start, false, { allowCustomPlayback: true });
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) {
+      this.playSegment(start, end, { labelId: options?.labelId });
+      return;
+    }
+    const token = ++this._segmentPlayToken;
+    this.playbackMode = "segment";
+    this._activeSegmentLabelId = options?.labelId || null;
+    this._activeSegmentStart = start;
+    this._activeSegmentEnd = end;
+    this._activeSegmentFilter = {
+      type: "bandpass",
+      freqMinHz: fLo,
+      freqMaxHz: fHi
+    };
+    const ctx = new Ctor();
+    const bandpass = ctx.createBiquadFilter();
+    bandpass.type = "bandpass";
+    bandpass.frequency.value = center;
+    bandpass.Q.value = q;
+    const gain = ctx.createGain();
+    gain.gain.value = this.muted ? 0 : this.volume;
+    bandpass.connect(gain);
+    gain.connect(ctx.destination);
+    const playback = {
+      token,
+      ctx,
+      source: null,
+      bandpass,
+      gain,
+      startSec: start,
+      endSec: end,
+      startAtCtx: 0,
+      runStartSec: start,
+      sourceGeneration: 0,
+      rafId: 0,
+      currentTimeSec: start
+    };
+    this._customSegmentPlayback = playback;
+    this._startCustomSegmentSource(playback);
+    this._setTransportState("playing_segment", "bandpass-segment-start");
+    this._emit("segmentplaystart", { start, end, filter: { type: "bandpass", freqMinHz: fLo, freqMaxHz: fHi } });
+    const onFrame = () => {
+      if (!this._customSegmentPlayback || this._customSegmentPlayback.token !== token) return;
+      const elapsed = Math.max(0, ctx.currentTime - playback.startAtCtx);
+      const t = Math.min(playback.endSec, playback.runStartSec + elapsed);
+      playback.currentTimeSec = t;
+      this._scheduleUiUpdate({ time: t, fromPlayback: true });
+      if (t >= playback.endSec - 2e-3) {
+        if (this.loopPlayback) {
+          this._loopCustomSegmentPlayback(playback);
+          playback.rafId = requestAnimationFrame(onFrame);
+          return;
+        }
+        this._stopCustomSegmentPlayback("stopped", playback.endSec, { emitEnd: true });
+        return;
+      }
+      playback.rafId = requestAnimationFrame(onFrame);
+    };
+    playback.rafId = requestAnimationFrame(onFrame);
+  }
+  _startCustomSegmentSource(playback, source = null, startAtSec = null) {
+    if (!playback || !this._customSegmentPlayback || this._customSegmentPlayback.token !== playback.token) return;
+    playback.sourceGeneration = (playback.sourceGeneration || 0) + 1;
+    const generation = playback.sourceGeneration;
+    const nextSource = source || playback.ctx.createBufferSource();
+    nextSource.buffer = this.audioBuffer;
+    nextSource.connect(playback.bandpass);
+    nextSource.onended = () => {
+      if (!this._customSegmentPlayback || this._customSegmentPlayback.token !== playback.token) return;
+      if (playback.sourceGeneration !== generation) return;
+      if (this.loopPlayback) {
+        this._loopCustomSegmentPlayback(playback);
+        return;
+      }
+      this._stopCustomSegmentPlayback("stopped", playback.endSec, { emitEnd: true });
+    };
+    playback.source = nextSource;
+    playback.runStartSec = startAtSec == null ? playback.startSec : Math.max(playback.startSec, Math.min(startAtSec, playback.endSec - 1e-3));
+    playback.startAtCtx = playback.ctx.currentTime + 5e-3;
+    nextSource.start(playback.startAtCtx, playback.runStartSec, playback.endSec - playback.runStartSec);
+  }
+  _loopCustomSegmentPlayback(playback) {
+    if (!playback || !this._customSegmentPlayback || this._customSegmentPlayback.token !== playback.token) return;
+    playback.currentTimeSec = playback.startSec;
+    this._scheduleUiUpdate({
+      time: playback.startSec,
+      fromPlayback: false,
+      immediate: true
+    });
+    this._emit("segmentloop", { start: playback.startSec, end: playback.endSec, filter: "bandpass" });
+    this._startCustomSegmentSource(playback);
+  }
+  updateActiveSegmentFromLabel(label) {
+    if (!label || this.playbackMode !== "segment") return;
+    const labelId = label.id || null;
+    if (this._activeSegmentLabelId && labelId && this._activeSegmentLabelId !== labelId) return;
+    const dur = this.audioBuffer?.duration || 0;
+    if (dur <= 0) return;
+    const start = Math.max(0, Math.min(Number(label.start ?? 0), dur));
+    const end = Math.max(start + 0.01, Math.min(Number(label.end ?? start + 0.01), dur));
+    this._activeSegmentStart = start;
+    this._activeSegmentEnd = end;
+    if (this._customSegmentPlayback) {
+      this._retargetCustomSegmentPlayback({
+        start,
+        end,
+        freqMinHz: Number(label.freqMin),
+        freqMaxHz: Number(label.freqMax)
+      });
+      return;
+    }
+    const now = this._getCurrentTime();
+    if (now < start || now > end) {
+      this._seekToTime(start, false, { allowCustomPlayback: true });
+      if (this.loopPlayback && !this.wavesurfer?.isPlaying()) this.wavesurfer?.play();
+    }
+  }
+  _retargetCustomSegmentPlayback({ start, end, freqMinHz, freqMaxHz }) {
+    const playback = this._customSegmentPlayback;
+    if (!playback || !this.audioBuffer) return;
+    playback.startSec = start;
+    playback.endSec = end;
+    const hasFreq = Number.isFinite(freqMinHz) && Number.isFinite(freqMaxHz);
+    if (hasFreq) {
+      const nyquist = Math.max(100, this.audioBuffer.sampleRate * 0.5 - 10);
+      const fLo = Math.max(20, Math.min(freqMinHz, freqMaxHz, nyquist - 5));
+      const fHi = Math.max(fLo + 5, Math.min(Math.max(freqMinHz, freqMaxHz), nyquist));
+      const center = Math.sqrt(fLo * fHi);
+      const bandwidth = Math.max(10, fHi - fLo);
+      const q = Math.max(0.25, Math.min(40, center / bandwidth));
+      playback.bandpass.frequency.value = center;
+      playback.bandpass.Q.value = q;
+      this._activeSegmentFilter = { type: "bandpass", freqMinHz: fLo, freqMaxHz: fHi };
+    }
+    const desiredStart = Math.max(start, Math.min(playback.currentTimeSec || start, end - 1e-3));
+    this._restartCustomSegmentSource(playback, desiredStart);
+  }
+  _restartCustomSegmentSource(playback, atSec) {
+    if (!playback || !this._customSegmentPlayback || this._customSegmentPlayback.token !== playback.token) return;
+    playback.sourceGeneration = (playback.sourceGeneration || 0) + 1;
+    if (playback.source) {
+      playback.source.onended = null;
+      try {
+        playback.source.stop();
+      } catch {
+      }
+      try {
+        playback.source.disconnect();
+      } catch {
+      }
+      playback.source = null;
+    }
+    playback.currentTimeSec = atSec;
+    this._scheduleUiUpdate({ time: atSec, fromPlayback: false, immediate: true });
+    this._startCustomSegmentSource(playback, null, atSec);
+  }
+  _stopCustomSegmentPlayback(reason = "stopped", targetTimeSec = null, options = {}) {
+    const active = this._customSegmentPlayback;
+    if (!active) return;
+    if (active.rafId) cancelAnimationFrame(active.rafId);
+    active.rafId = 0;
+    if (active.source) {
+      active.source.onended = null;
+      try {
+        active.source.stop();
+      } catch {
+      }
+      try {
+        active.source.disconnect();
+      } catch {
+      }
+    }
+    try {
+      active.bandpass?.disconnect();
+    } catch {
+    }
+    try {
+      active.gain.disconnect();
+    } catch {
+    }
+    try {
+      active.ctx.close();
+    } catch {
+    }
+    this._customSegmentPlayback = null;
+    this._activeSegmentLabelId = null;
+    this._activeSegmentFilter = null;
+    this._activeSegmentStart = null;
+    this._activeSegmentEnd = null;
+    this.playbackMode = "normal";
+    this._segmentPlayToken++;
+    if (Number.isFinite(targetTimeSec)) {
+      this._scheduleUiUpdate({ time: targetTimeSec, fromPlayback: false, immediate: true });
+    }
+    this.d.playPauseBtn.classList.remove("playing");
+    this._setTransportState(reason === "paused" ? "paused_segment" : "stopped", "bandpass-segment-stop");
+    if (options.emitEnd) {
+      this._emit("segmentplayend", { end: targetTimeSec ?? 0 });
+    }
+  }
+  _clearPlaybackFilter() {
+    if (!this.wavesurfer) return;
+    if (typeof this.wavesurfer.setFilter === "function") {
+      try {
+        this.wavesurfer.setFilter(null);
+      } catch {
+      }
+    }
+  }
+  _seekToTime(timeSec, centerView = false, options = {}) {
+    if (!this.audioBuffer) return;
+    if (this._customSegmentPlayback && options.allowCustomPlayback !== true) {
+      this._stopCustomSegmentPlayback("paused", this._customSegmentPlayback.currentTimeSec);
+    }
     const t = Math.max(0, Math.min(timeSec, this.audioBuffer.duration));
     if (this.wavesurfer) this.wavesurfer.setTime(t);
-    this._updateTimeReadout(t);
-    this._updatePlayhead(t, false);
-    if (centerView) this._centerViewportAtTime(t);
+    this._scheduleUiUpdate({
+      time: t,
+      fromPlayback: false,
+      centerView,
+      emitSeek: true,
+      immediate: true
+    });
   }
   _seekByDelta(deltaSec) {
     if (!this.audioBuffer) return;
     this._seekToTime(this._getCurrentTime() + deltaSec, false);
   }
+  _seekRelative(deltaSec) {
+    this._seekByDelta(deltaSec);
+  }
   _getCurrentTime() {
+    if (this._customSegmentPlayback) return this._customSegmentPlayback.currentTimeSec;
     return this.wavesurfer ? this.wavesurfer.getCurrentTime() : 0;
   }
   _updateTimeReadout(t) {
-    this.d.currentTimeDisplay.textContent = formatTime(t);
+    const nextText = formatTime(t);
+    if (nextText !== this._lastTimeReadoutText) {
+      this._lastTimeReadoutText = nextText;
+      this.d.currentTimeDisplay.textContent = nextText;
+    }
+    this._updateAriaPlaybackPosition(t);
+  }
+  _updateAriaPlaybackPosition(currentTimeSec) {
+    const slider = this.d.canvasWrapper;
+    if (!slider) return;
+    const duration = this.audioBuffer?.duration || 0;
+    const now = Math.max(0, Math.min(currentTimeSec || 0, duration || currentTimeSec || 0));
+    slider.setAttribute("aria-valuemin", "0");
+    slider.setAttribute("aria-valuemax", String(duration.toFixed(3)));
+    slider.setAttribute("aria-valuenow", String(now.toFixed(3)));
+    slider.setAttribute("aria-valuetext", `${formatTime(now)} of ${formatTime(duration)}`);
   }
   // ═════════════════════════════════════════════════════════════════
   //  Playhead & Follow
@@ -1814,14 +2636,35 @@ var PlayerState = class {
       }
     }
     this._syncOverviewWindowToViewport();
+    if (!this._customSegmentPlayback && this._activeSegmentEnd != null && currentTime >= this._activeSegmentEnd - 5e-3) {
+      const start = this._activeSegmentStart ?? 0;
+      const end = this._activeSegmentEnd;
+      if (this.loopPlayback && this.wavesurfer?.isPlaying()) {
+        this._seekToTime(start, false, { allowCustomPlayback: true });
+        this._emit("segmentloop", { start, end, filter: "none" });
+        return;
+      }
+      this._activeSegmentStart = null;
+      this._activeSegmentLabelId = null;
+      this._activeSegmentFilter = null;
+      this._activeSegmentEnd = null;
+      this.playbackMode = "normal";
+      this._segmentPlayToken++;
+      this._suppressNextPauseHandler = true;
+      this.wavesurfer?.pause();
+      this._seekToTime(end, false);
+      this.d.playPauseBtn.classList.remove("playing");
+      this._setTransportState("stopped", "segment-end");
+      this._emit("segmentplayend", { end });
+    }
   }
   // ═════════════════════════════════════════════════════════════════
   //  Spectrogram Pipeline
   // ═════════════════════════════════════════════════════════════════
   async _generateSpectrogram() {
     if (!this.audioBuffer) return;
-    this._setPlayState("Rendering...");
-    const result = await this.processor.compute(this.audioBuffer.getChannelData(0), {
+    this._setTransportState("rendering", "spectrogram-generate");
+    const options = {
       fftSize: parseInt(this.d.fftSizeSelect.value, 10),
       sampleRate: this.audioBuffer.sampleRate,
       frameRate: PERCH_FRAME_RATE,
@@ -1830,18 +2673,146 @@ var PlayerState = class {
       pcenBias: PERCH_PCEN_BIAS,
       pcenRoot: PERCH_PCEN_ROOT,
       pcenSmoothing: PERCH_PCEN_SMOOTHING
-    });
-    this.spectrogramData = result.data;
-    this.spectrogramFrames = result.nFrames;
-    this.spectrogramMels = result.nMels;
-    this._updateSpectrogramStats();
-    this._autoContrast();
-    this._autoFrequency();
-    this._buildSpectrogramGrayscale();
-    this._buildSpectrogramBaseImage();
-    this._drawSpectrogram();
-    this._syncOverviewWindowToViewport();
-    this._setPlayState("Ready");
+    };
+    try {
+      const channelData = this.audioBuffer.getChannelData(0);
+      let result;
+      let fromCache = false;
+      let cacheEntry = null;
+      const cacheKey = this.audioHash ? buildSpectrogramCacheKey({
+        fileHash: this.audioHash,
+        ...options
+      }) : null;
+      if (cacheKey) {
+        const cached = await getSpectrogramCacheEntry(cacheKey);
+        cacheEntry = cached;
+        if (cached?.spectrogramData && cached?.nFrames && cached?.nMels) {
+          this._emit("cachehit", { cacheKey });
+          result = {
+            data: new Float32Array(cached.spectrogramData),
+            nFrames: cached.nFrames,
+            nMels: cached.nMels
+          };
+          fromCache = true;
+          this.spectrogramAbsLogMin = cached.absLogMin ?? 0;
+          this.spectrogramAbsLogMax = cached.absLogMax ?? 1;
+          if (Number.isFinite(cached.floorPct) && Number.isFinite(cached.ceilPct)) {
+            this.d.floorSlider.value = Math.round(cached.floorPct);
+            this.d.ceilSlider.value = Math.round(cached.ceilPct);
+          }
+          if (Number.isFinite(cached.maxFreq)) {
+            const optionsList = Array.from(this.d.maxFreqSelect.options);
+            let best = optionsList[optionsList.length - 1];
+            for (const opt of optionsList) {
+              if (parseFloat(opt.value) >= cached.maxFreq) {
+                best = opt;
+                break;
+              }
+            }
+            this.d.maxFreqSelect.value = best.value;
+          }
+        } else {
+          this._emit("cachemiss", { cacheKey });
+        }
+      }
+      const shouldUseProgressive = this.options.enableProgressiveSpectrogram === true && this.audioBuffer.duration >= PROGRESSIVE_MIN_DURATION_SEC && typeof this.processor.computeProgressive === "function";
+      if (!result) {
+        if (shouldUseProgressive) {
+          const chunkResults = [];
+          for await (const progress of this.processor.computeProgressive(channelData, {
+            ...options,
+            chunkSeconds: PROGRESSIVE_CHUNK_SECONDS
+          })) {
+            chunkResults.push(progress.result);
+            this._emit("progress", {
+              chunk: progress.chunk,
+              totalChunks: progress.totalChunks,
+              percent: progress.percent
+            });
+          }
+          result = this._mergeProgressiveResults(chunkResults, options.nMels);
+        } else {
+          result = await this.processor.compute(channelData, options);
+        }
+      }
+      this.spectrogramData = result.data;
+      this.spectrogramFrames = result.nFrames;
+      this.spectrogramMels = result.nMels;
+      if (!fromCache) {
+        this._updateSpectrogramStats();
+        this._autoContrast();
+        this._autoFrequency();
+      }
+      const cachedGray = cacheEntry?.grayscaleTexture;
+      const selectedMaxFreq = parseFloat(this.d.maxFreqSelect.value);
+      const canReuseGray = fromCache && cachedGray && Number.isFinite(cachedGray.maxFreq) && Math.abs(cachedGray.maxFreq - selectedMaxFreq) < 1e-6 && cachedGray.width > 0 && cachedGray.height > 0;
+      if (canReuseGray) {
+        this.spectrogramGrayInfo = {
+          gray: new Uint8Array(cachedGray.gray),
+          width: cachedGray.width,
+          height: cachedGray.height
+        };
+        if (this.colorizer.ok) {
+          const { gray, width, height } = this.spectrogramGrayInfo;
+          this._gpuReady = this.colorizer.uploadGrayscale(gray, width, height);
+        } else {
+          this._gpuReady = false;
+        }
+      } else {
+        this._buildSpectrogramGrayscale();
+      }
+      this._buildSpectrogramBaseImage();
+      this._drawSpectrogram();
+      this._syncOverviewWindowToViewport();
+      this._setTransportState("ready", "spectrogram-ready");
+      if (cacheKey && this.spectrogramData?.length) {
+        const cacheWriteOk = await putSpectrogramCacheEntry({
+          cacheKey,
+          createdAt: Date.now(),
+          nFrames: this.spectrogramFrames,
+          nMels: this.spectrogramMels,
+          absLogMin: this.spectrogramAbsLogMin,
+          absLogMax: this.spectrogramAbsLogMax,
+          floorPct: parseFloat(this.d.floorSlider.value),
+          ceilPct: parseFloat(this.d.ceilSlider.value),
+          maxFreq: parseFloat(this.d.maxFreqSelect.value),
+          spectrogramData: new Float32Array(this.spectrogramData),
+          grayscaleTexture: this.spectrogramGrayInfo ? {
+            gray: new Uint8Array(this.spectrogramGrayInfo.gray),
+            width: this.spectrogramGrayInfo.width,
+            height: this.spectrogramGrayInfo.height,
+            maxFreq: parseFloat(this.d.maxFreqSelect.value)
+          } : null,
+          metadata: {
+            sampleRate: this.audioBuffer.sampleRate,
+            duration: this.audioBuffer.duration,
+            fftSize: options.fftSize
+          }
+        });
+        if (cacheWriteOk) this._emit("cachewrite", { cacheKey });
+      }
+      this._emit("ready", {
+        duration: this.audioBuffer.duration,
+        sampleRate: this.audioBuffer.sampleRate,
+        nFrames: this.spectrogramFrames,
+        nMels: this.spectrogramMels
+      });
+    } catch (error) {
+      this._setTransportState("error", "spectrogram-error");
+      this._emit("error", { message: error?.message || String(error), source: "spectrogram" });
+      throw error;
+    }
+  }
+  _mergeProgressiveResults(chunkResults, nMels) {
+    let totalFrames = 0;
+    for (const chunk of chunkResults) totalFrames += chunk.nFrames;
+    const data = new Float32Array(totalFrames * nMels);
+    let frameOffset = 0;
+    for (const chunk of chunkResults) {
+      data.set(chunk.data, frameOffset * nMels);
+      frameOffset += chunk.nFrames;
+    }
+    return { data, nFrames: totalFrames, nMels };
   }
   _updateSpectrogramStats() {
     const stats = updateSpectrogramStats(this.spectrogramData);
@@ -1890,6 +2861,7 @@ var PlayerState = class {
       }
     }
     this.d.maxFreqSelect.value = best.value;
+    this._emit("spectrogramscalechange", { maxFreq: parseFloat(this.d.maxFreqSelect.value) });
     this._createFrequencyLabels();
     if (redraw) {
       this._buildSpectrogramGrayscale();
@@ -1901,6 +2873,9 @@ var PlayerState = class {
   _setVolume(val) {
     this.volume = Math.max(0, Math.min(1, val));
     if (this.wavesurfer) this.wavesurfer.setVolume(this.volume);
+    if (this._customSegmentPlayback?.gain) {
+      this._customSegmentPlayback.gain.gain.value = this.muted ? 0 : this.volume;
+    }
     this._updateVolumeIcon();
   }
   _toggleMute() {
@@ -1912,6 +2887,7 @@ var PlayerState = class {
       this.preMuteVolume = this.volume;
       this.muted = true;
       if (this.wavesurfer) this.wavesurfer.setVolume(0);
+      if (this._customSegmentPlayback?.gain) this._customSegmentPlayback.gain.gain.value = 0;
       this._updateVolumeIcon();
     }
   }
@@ -1979,8 +2955,7 @@ var PlayerState = class {
       frameRate: PERCH_FRAME_RATE,
       spectrogramFrames: this.spectrogramFrames
     });
-    this._syncOverviewWindowToViewport();
-    this._updatePlayhead(this._getCurrentTime(), false);
+    this._scheduleUiUpdate({ time: this._getCurrentTime(), fromPlayback: false, immediate: true });
   }
   _requestSpectrogramRedraw() {
     if (this.zoomRedrawTimeout) clearTimeout(this.zoomRedrawTimeout);
@@ -2003,8 +2978,7 @@ var PlayerState = class {
       waveformHeight: this.waveformDisplayHeight,
       amplitudePeakAbs: this.amplitudePeakAbs
     });
-    this._syncOverviewWindowToViewport();
-    this._updatePlayhead(this._getCurrentTime(), false);
+    this._scheduleUiUpdate({ time: this._getCurrentTime(), fromPlayback: false, immediate: true });
   }
   _drawOverviewWaveform() {
     renderOverviewWaveform({
@@ -2013,7 +2987,7 @@ var PlayerState = class {
       overviewContainer: this.d.overviewContainer,
       amplitudePeakAbs: this.amplitudePeakAbs
     });
-    this._syncOverviewWindowToViewport();
+    this._scheduleUiUpdate({ time: this._getCurrentTime(), fromPlayback: false, immediate: true });
   }
   _createFrequencyLabels() {
     renderFrequencyLabels({
@@ -2058,7 +3032,7 @@ var PlayerState = class {
     this.d.canvasWrapper.scrollLeft = bounded;
     this.d.waveformWrapper.scrollLeft = this.d.canvasWrapper.scrollLeft;
     this.scrollSyncLock = false;
-    this._syncOverviewWindowToViewport();
+    this._scheduleUiUpdate({ time: this._getCurrentTime(), fromPlayback: false });
   }
   _setPixelsPerSecond(nextPps, redraw, anchorTime, anchorPixel) {
     const minPps = Number(this.d.zoomSlider.min);
@@ -2080,6 +3054,7 @@ var PlayerState = class {
       this.pixelsPerSecond = effectivePps;
       this.d.zoomSlider.value = String(Math.round(effectivePps / sliderStep) * sliderStep);
       this.d.zoomValue.textContent = `${Math.round(effectivePps)} px/s`;
+      this._emit("zoomchange", { pixelsPerSecond: this.pixelsPerSecond });
       if (this.wavesurfer) this.wavesurfer.zoom(effectivePps);
       if (this.audioBuffer && redraw) {
         if (this.spectrogramData && this.spectrogramFrames > 0) this._drawSpectrogram();
@@ -2092,6 +3067,14 @@ var PlayerState = class {
     if (!this.audioBuffer) return;
     const fitPps = this._getViewportWidth() / Math.max(0.05, this.audioBuffer.duration);
     this._setPixelsPerSecond(fitPps, true, 0, 0);
+  }
+  _zoomByScale(scale, centerClientX, source = "spectrogram") {
+    if (!this.audioBuffer) return;
+    const wrapper = source === "waveform" ? this.d.waveformWrapper : this.d.canvasWrapper;
+    const rect = wrapper.getBoundingClientRect();
+    const localX = Math.max(0, Math.min(rect.width, centerClientX - rect.left));
+    const anchorTime = (wrapper.scrollLeft + localX) / Math.max(this.pixelsPerSecond, 0.01);
+    this._setPixelsPerSecond(this.pixelsPerSecond * scale, true, anchorTime, localX);
   }
   _centerViewportAtTime(timeSec) {
     if (!this.audioBuffer) return;
@@ -2119,10 +3102,27 @@ var PlayerState = class {
     const viewTime = vw / this.pixelsPerSecond;
     const startTime = this.d.canvasWrapper.scrollLeft / this.pixelsPerSecond;
     const endTime = Math.min(this.audioBuffer.duration, startTime + viewTime);
-    this.windowStartNorm = startTime / this.audioBuffer.duration;
-    this.windowEndNorm = endTime / this.audioBuffer.duration;
-    this._updateOverviewWindowElement();
-    this.d.viewRangeDisplay.textContent = `${formatSecondsShort(startTime)} \u2013 ${formatSecondsShort(endTime)}`;
+    const nextStartNorm = startTime / this.audioBuffer.duration;
+    const nextEndNorm = endTime / this.audioBuffer.duration;
+    const moved = Math.abs(nextStartNorm - this.windowStartNorm) > 1e-5 || Math.abs(nextEndNorm - this.windowEndNorm) > 1e-5;
+    this.windowStartNorm = nextStartNorm;
+    this.windowEndNorm = nextEndNorm;
+    if (moved) this._updateOverviewWindowElement();
+    const rangeChanged = Math.abs(startTime - this._lastViewRangeTextStart) > 0.05 || Math.abs(endTime - this._lastViewRangeTextEnd) > 0.05;
+    if (rangeChanged) {
+      this._lastViewRangeTextStart = startTime;
+      this._lastViewRangeTextEnd = endTime;
+      this.d.viewRangeDisplay.textContent = `${formatSecondsShort(startTime)} \u2013 ${formatSecondsShort(endTime)}`;
+    }
+    const now = performance.now();
+    const selectionChanged = !Number.isFinite(this._lastSelectionStart) || Math.abs(startTime - this._lastSelectionStart) > 0.03 || Math.abs(endTime - this._lastSelectionEnd) > 0.03;
+    if (selectionChanged && now - this._lastSelectionEmitAt >= 80) {
+      this._lastSelectionEmitAt = now;
+      this._lastSelectionStart = startTime;
+      this._lastSelectionEnd = endTime;
+      this._perf.selectionEvents += 1;
+      this._emit("selection", { start: startTime, end: endTime });
+    }
   }
   _updateOverviewWindowElement() {
     const cw = this.d.overviewContainer.clientWidth;
@@ -2180,6 +3180,7 @@ var PlayerState = class {
   //  Click / Pointer / Drag
   // ═════════════════════════════════════════════════════════════════
   _handleCanvasClick(e) {
+    if (performance.now() < this._blockSeekClickUntil) return;
     if (this.suppressSeekClick) {
       this.suppressSeekClick = false;
       return;
@@ -2188,12 +3189,17 @@ var PlayerState = class {
     this._seekToTime(this._clientXToTime(e.clientX, "spectrogram"), false);
   }
   _handleWaveformClick(e) {
+    if (performance.now() < this._blockSeekClickUntil) return;
     if (this.suppressSeekClick) {
       this.suppressSeekClick = false;
       return;
     }
     if (!this.audioBuffer) return;
     this._seekToTime(this._clientXToTime(e.clientX, "waveform"), false);
+  }
+  _blockSeekClicks(ms = 220) {
+    this._blockSeekClickUntil = Math.max(this._blockSeekClickUntil, performance.now() + ms);
+    this.suppressSeekClick = true;
   }
   _startPlayheadDrag(event, source) {
     if (!this.audioBuffer) return;
@@ -2259,7 +3265,6 @@ var PlayerState = class {
   _updateViewResize(clientY) {
     if (!this.viewResizeMode) return;
     const dy = clientY - this.viewResizeStartY;
-    const savedScroll = this.d.canvasWrapper.scrollLeft;
     let redrawWav = false;
     if (this.viewResizeMode === "split") {
       const total = this.viewResizeStartWaveformHeight + this.viewResizeStartSpectrogramHeight;
@@ -2277,14 +3282,41 @@ var PlayerState = class {
     this._applyLocalViewHeights();
     if (redrawWav) this._updateAmplitudeLabels();
     if (!this.audioBuffer) return;
-    if (redrawWav) this._drawMainWaveform();
-    if (this.spectrogramData && this.spectrogramFrames > 0) this._drawSpectrogram();
-    this._setLinkedScrollLeft(savedScroll);
+    this._queueResizeRedraw({
+      redrawWaveform: redrawWav,
+      redrawSpectrogram: this.spectrogramData && this.spectrogramFrames > 0
+    });
   }
   _stopViewResize() {
     if (!this.viewResizeMode) return;
+    this._flushResizeRedraw(true);
     this.viewResizeMode = null;
     document.body.style.cursor = "";
+  }
+  _queueResizeRedraw({ redrawWaveform = false, redrawSpectrogram = false } = {}) {
+    this._viewResizeNeedsWaveformRedraw = this._viewResizeNeedsWaveformRedraw || redrawWaveform;
+    this._viewResizeNeedsSpectrogramRedraw = this._viewResizeNeedsSpectrogramRedraw || redrawSpectrogram;
+    if (this._viewResizeFrameId) return;
+    this._viewResizeFrameId = requestAnimationFrame(() => this._flushResizeRedraw(false));
+  }
+  _flushResizeRedraw(force) {
+    if (!this.audioBuffer) return;
+    if (this._viewResizeFrameId) {
+      cancelAnimationFrame(this._viewResizeFrameId);
+      this._viewResizeFrameId = 0;
+    }
+    const redrawWaveform = force || this._viewResizeNeedsWaveformRedraw;
+    const redrawSpectrogram = force || this._viewResizeNeedsSpectrogramRedraw;
+    this._viewResizeNeedsWaveformRedraw = false;
+    this._viewResizeNeedsSpectrogramRedraw = false;
+    const savedScroll = this.d.canvasWrapper.scrollLeft;
+    if (redrawWaveform) this._drawMainWaveform();
+    if (redrawSpectrogram) this._drawSpectrogram();
+    this._setLinkedScrollLeft(savedScroll);
+    this._emit("viewresize", {
+      waveformHeight: this.waveformDisplayHeight,
+      spectrogramHeight: this.spectrogramDisplayHeight
+    });
   }
   // ═════════════════════════════════════════════════════════════════
   //  UI State Helpers
@@ -2393,6 +3425,7 @@ var PlayerState = class {
     });
     on(this.d.maxFreqSelect, "change", () => {
       if (this.audioBuffer && this.spectrogramData && this.spectrogramFrames > 0) {
+        this._emit("spectrogramscalechange", { maxFreq: parseFloat(this.d.maxFreqSelect.value) });
         this._createFrequencyLabels();
         this._buildSpectrogramGrayscale();
         this._buildSpectrogramBaseImage();
@@ -2434,6 +3467,30 @@ var PlayerState = class {
     });
     on(this.d.canvasWrapper, "wheel", (e) => this._handleWheel(e, "spectrogram"), { passive: false });
     on(this.d.waveformWrapper, "wheel", (e) => this._handleWheel(e, "waveform"), { passive: false });
+    on(this.d.canvasWrapper, "keydown", (e) => {
+      if (!this.audioBuffer) return;
+      if (isTypingContext(e.target)) return;
+      switch (e.key) {
+        case "ArrowLeft":
+          e.preventDefault();
+          this._seekByDelta(-SEEK_FINE_SEC);
+          break;
+        case "ArrowRight":
+          e.preventDefault();
+          this._seekByDelta(SEEK_FINE_SEC);
+          break;
+        case "Home":
+          e.preventDefault();
+          this._seekToTime(0, true);
+          break;
+        case "End":
+          e.preventDefault();
+          this._seekToTime(this.audioBuffer.duration, true);
+          break;
+        default:
+          break;
+      }
+    });
     on(this.d.canvasWrapper, "pointerdown", (e) => this._startViewportPan(e, "spectrogram"));
     on(this.d.waveformWrapper, "pointerdown", (e) => this._startViewportPan(e, "waveform"));
     on(this.d.playhead, "pointerdown", (e) => this._startPlayheadDrag(e, "spectrogram"));
@@ -2492,12 +3549,678 @@ var PlayerState = class {
       this._drawMainWaveform();
       this._drawOverviewWaveform();
       this._syncOverviewWindowToViewport();
+      this._emit("viewresize", {
+        waveformHeight: this.waveformDisplayHeight,
+        spectrogramHeight: this.spectrogramDisplayHeight
+      });
     });
     on(window, "beforeunload", () => this.dispose());
   }
+  _bindTouchGestures() {
+    const bindRecognizer = (element, source) => {
+      if (!element) return;
+      const rec = new GestureRecognizer(element);
+      const offSwipe = rec.on("swipe", ({ dx }) => {
+        if (!this.audioBuffer) return;
+        this._seekRelative(dx / Math.max(1, this.pixelsPerSecond));
+      });
+      const offPinch = rec.on("pinch", ({ scale, centerX }) => {
+        if (!this.audioBuffer) return;
+        const clampedScale = Math.max(0.85, Math.min(1.15, scale));
+        this._zoomByScale(clampedScale, centerX, source);
+      });
+      const offDoubleTap = rec.on("doubletap", () => {
+        if (!this.audioBuffer) return;
+        this._fitEntireTrackInView();
+      });
+      this._cleanups.push(() => {
+        offSwipe();
+        offPinch();
+        offDoubleTap();
+        rec.dispose();
+      });
+    };
+    bindRecognizer(this.d.waveformWrapper, "waveform");
+    bindRecognizer(this.d.canvasWrapper, "spectrogram");
+  }
 };
 
-// src/player/BirdNETPlayer.js
+// src/annotations.js
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+var AnnotationLayer = class {
+  constructor() {
+    this.player = null;
+    this.overlay = null;
+    this.annotations = [];
+    this._liveLinkedId = null;
+    this._unsubs = [];
+    this._domCleanups = [];
+    this._editing = null;
+    this._suppressClickUntil = 0;
+  }
+  attach(player) {
+    this.detach();
+    this.player = player;
+    const root = this.player?._state?.d?.waveformContent || this.player?.root?.querySelector(".waveform-content");
+    if (!root) return;
+    this.overlay = document.createElement("div");
+    this.overlay.className = "annotation-layer";
+    root.appendChild(this.overlay);
+    this._unsubs.push(this.player.on("ready", () => this.render()));
+    this._unsubs.push(this.player.on("zoomchange", () => this.render()));
+    this._unsubs.push(this.player.on("viewresize", () => this.render()));
+    this._unsubs.push(this.player.on("seek", (e) => this.highlightActiveRegion(e.detail.currentTime)));
+    this._unsubs.push(this.player.on("timeupdate", (e) => this.highlightActiveRegion(e.detail.currentTime)));
+    this._bindEditingInteractions(root);
+    this.render();
+  }
+  detach() {
+    for (const unsub of this._unsubs) unsub();
+    this._unsubs = [];
+    for (const cleanup of this._domCleanups) cleanup();
+    this._domCleanups = [];
+    if (this.overlay?.parentNode) this.overlay.parentNode.removeChild(this.overlay);
+    this.overlay = null;
+    this.player = null;
+    this._editing = null;
+  }
+  add(annotation) {
+    const region = this._normalize(annotation);
+    this.annotations.push(region);
+    this.render();
+    this.player?._emit?.("annotationcreate", { annotation: { ...region } });
+    return region.id;
+  }
+  set(regions = []) {
+    this.annotations = regions.map((r) => this._normalize(r));
+    this.render();
+  }
+  clear() {
+    this.annotations = [];
+    this.render();
+  }
+  remove(id) {
+    this.annotations = this.annotations.filter((a) => a.id !== id);
+    this.render();
+  }
+  getAll() {
+    return [...this.annotations];
+  }
+  setLiveLinkedId(id = null) {
+    this._liveLinkedId = id || null;
+  }
+  highlightActiveRegion(currentTime) {
+    if (!this.overlay) return;
+    for (const el of this.overlay.querySelectorAll(".annotation-region")) {
+      const start = parseFloat(el.dataset.start || "0");
+      const end = parseFloat(el.dataset.end || "0");
+      el.classList.toggle("active", currentTime >= start && currentTime <= end);
+    }
+  }
+  exportRavenFormat(regions = this.annotations) {
+    return regions.map((r) => `${r.start}	${r.end}	${r.species || ""}	${r.confidence ?? ""}`).join("\n");
+  }
+  render() {
+    if (!this.overlay || !this.player) return;
+    const pps = this.player._state?.pixelsPerSecond || 100;
+    const duration = this.player.duration || this.player._state?.audioBuffer?.duration || 0;
+    const width = Math.max(1, Math.floor(duration * pps));
+    this.overlay.style.width = `${width}px`;
+    this.overlay.innerHTML = "";
+    for (const region of this.annotations) {
+      const el = this._createRegionElement(region, pps);
+      this.overlay.appendChild(el);
+    }
+  }
+  _createRegionElement(region, pixelsPerSecond) {
+    const el = document.createElement("div");
+    el.className = "annotation-region";
+    if (this._liveLinkedId && region.id === this._liveLinkedId) el.classList.add("linked-live");
+    el.setAttribute("role", "button");
+    el.setAttribute("tabindex", "0");
+    el.style.left = `${Math.max(0, region.start * pixelsPerSecond)}px`;
+    el.style.width = `${Math.max(1, (region.end - region.start) * pixelsPerSecond)}px`;
+    if (region.color) el.style.setProperty("--annotation-color", region.color);
+    el.dataset.id = region.id;
+    el.dataset.start = String(region.start);
+    el.dataset.end = String(region.end);
+    el.title = `${region.species || "Annotation"} (${region.start.toFixed(2)}s\u2013${region.end.toFixed(2)}s)`;
+    el.innerHTML = `
+            <span class="annotation-label">${region.species || "Annotation"}</span>
+            <span class="annotation-confidence">${region.confidence != null ? `${Math.round(region.confidence * 100)}%` : ""}</span>
+            <span class="annotation-handle handle-l" data-mode="resize-l"></span>
+            <span class="annotation-handle handle-r" data-mode="resize-r"></span>
+        `;
+    el.addEventListener("click", (event) => {
+      if (performance.now() < this._suppressClickUntil) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.player?._state?._blockSeekClicks?.(260);
+      this.player?.playSegment?.(region.start, region.end, { labelId: region.id });
+    });
+    el.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      const handle = event.target?.closest?.(".annotation-handle");
+      const mode = handle?.dataset?.mode || "move";
+      this._startEditInteraction(region.id, mode, event.clientX, el);
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    return el;
+  }
+  _bindEditingInteractions(root) {
+    const onPointerMove = (e) => {
+      if (!this._editing) return;
+      this._updateEditInteraction(e.clientX);
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const onPointerUp = (e) => {
+      if (!this._editing) return;
+      this._finishEditInteraction();
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    root.addEventListener("pointermove", onPointerMove, true);
+    document.addEventListener("pointerup", onPointerUp, true);
+    document.addEventListener("pointercancel", onPointerUp, true);
+    this._domCleanups.push(() => root.removeEventListener("pointermove", onPointerMove, true));
+    this._domCleanups.push(() => document.removeEventListener("pointerup", onPointerUp, true));
+    this._domCleanups.push(() => document.removeEventListener("pointercancel", onPointerUp, true));
+  }
+  _startEditInteraction(id, mode, clientX, element) {
+    const region = this.annotations.find((a) => a.id === id);
+    if (!region) return;
+    this._editing = {
+      id,
+      mode,
+      startX: clientX,
+      startRegion: { ...region },
+      element,
+      pending: mode === "move",
+      moved: mode !== "move",
+      forceSuppressClick: mode !== "move"
+    };
+    if (mode !== "move") element.classList.add("editing");
+  }
+  _updateEditInteraction(clientX) {
+    if (!this._editing) return;
+    const region = this.annotations.find((a) => a.id === this._editing.id);
+    if (!region) return;
+    const pps = this.player?._state?.pixelsPerSecond || 100;
+    const duration = Math.max(1e-3, this.player?.duration || this.player?._state?.audioBuffer?.duration || 1e-3);
+    const dt = (clientX - this._editing.startX) / Math.max(1, pps);
+    const src = this._editing.startRegion;
+    let next = { ...region };
+    if (this._editing.pending) {
+      if (Math.abs(clientX - this._editing.startX) < 4) return;
+      this._editing.pending = false;
+      this._editing.moved = true;
+      this._editing.element?.classList?.add("editing");
+    }
+    if (this._editing.mode === "move") {
+      const span = src.end - src.start;
+      next.start = clamp(src.start + dt, 0, Math.max(0, duration - span));
+      next.end = next.start + span;
+    } else if (this._editing.mode === "resize-l") {
+      next.start = clamp(src.start + dt, 0, src.end - 0.01);
+    } else if (this._editing.mode === "resize-r") {
+      next.end = clamp(src.end + dt, src.start + 0.01, duration);
+    }
+    Object.assign(region, this._normalize({ ...src, ...next, id: src.id }));
+    this.player?._state?.updateActiveSegmentFromLabel?.(region);
+    this.player?._emit?.("annotationpreview", { annotation: { ...region } });
+    const el = this._editing.element;
+    if (el) {
+      el.dataset.start = String(region.start);
+      el.dataset.end = String(region.end);
+      el.style.left = `${Math.max(0, region.start * pps)}px`;
+      el.style.width = `${Math.max(1, (region.end - region.start) * pps)}px`;
+    }
+  }
+  _finishEditInteraction() {
+    if (!this._editing) return;
+    const shouldSuppressClick = this._editing.forceSuppressClick || this._editing.moved;
+    this._editing.element?.classList?.remove("editing");
+    const region = this.annotations.find((a) => a.id === this._editing.id);
+    if (region && this._editing.moved) this.player?._emit?.("annotationupdate", { annotation: { ...region } });
+    this._editing = null;
+    if (shouldSuppressClick) {
+      this._suppressClickUntil = performance.now() + 250;
+      this.render();
+    }
+  }
+  _normalize(annotation) {
+    const start = Number(annotation?.start ?? 0);
+    const end = Number(annotation?.end ?? start);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      throw new Error("AnnotationLayer: start/end must be finite numbers");
+    }
+    const s = Math.max(0, Math.min(start, end));
+    const e = Math.max(0, Math.max(start, end));
+    return {
+      id: annotation?.id || `ann_${Math.random().toString(36).slice(2, 10)}`,
+      start: s,
+      end: Math.max(s + 0.01, e),
+      species: annotation?.species || "",
+      confidence: annotation?.confidence,
+      color: annotation?.color || ""
+    };
+  }
+};
+var SpectrogramLabelLayer = class {
+  constructor() {
+    this.player = null;
+    this.overlay = null;
+    this.labels = [];
+    this._liveLinkedId = null;
+    this._unsubs = [];
+    this._domCleanups = [];
+    this._draftEl = null;
+    this._drawing = null;
+    this._editing = null;
+    this._counter = 1;
+    this._suppressClickUntil = 0;
+  }
+  attach(player) {
+    this.detach();
+    this.player = player;
+    const root = this.player?._state?.d?.canvasWrapper || this.player?.root?.querySelector(".canvas-wrapper");
+    if (!root) return;
+    this.overlay = document.createElement("div");
+    this.overlay.className = "spectrogram-label-layer";
+    root.appendChild(this.overlay);
+    this._unsubs.push(this.player.on("ready", () => this.render()));
+    this._unsubs.push(this.player.on("zoomchange", () => this.render()));
+    this._unsubs.push(this.player.on("viewresize", () => this.render()));
+    this._unsubs.push(this.player.on("spectrogramscalechange", () => this.render()));
+    this._unsubs.push(this.player.on("timeupdate", (e) => this.highlightActiveLabel(e.detail.currentTime)));
+    this._bindDrawingInteractions(root);
+    this.render();
+  }
+  detach() {
+    for (const unsub of this._unsubs) unsub();
+    this._unsubs = [];
+    for (const cleanup of this._domCleanups) cleanup();
+    this._domCleanups = [];
+    if (this.overlay?.parentNode) this.overlay.parentNode.removeChild(this.overlay);
+    this.overlay = null;
+    this.player = null;
+    this._draftEl = null;
+    this._drawing = null;
+    this._editing = null;
+  }
+  add(label) {
+    const region = this._normalize(label);
+    this.labels.push(region);
+    this.render();
+    this.player?._emit?.("spectrogramlabelcreate", { label: region });
+    return region.id;
+  }
+  set(labels = []) {
+    this.labels = labels.map((l) => this._normalize(l));
+    this.render();
+  }
+  clear() {
+    this.labels = [];
+    this.render();
+  }
+  remove(id) {
+    this.labels = this.labels.filter((l) => l.id !== id);
+    this.render();
+  }
+  getAll() {
+    return [...this.labels];
+  }
+  setLiveLinkedId(id = null) {
+    this._liveLinkedId = id || null;
+  }
+  highlightActiveLabel(currentTime) {
+    if (!this.overlay) return;
+    for (const el of this.overlay.querySelectorAll(".spectrogram-label-region")) {
+      const start = parseFloat(el.dataset.start || "0");
+      const end = parseFloat(el.dataset.end || "0");
+      el.classList.toggle("active", currentTime >= start && currentTime <= end);
+    }
+  }
+  render() {
+    if (!this.overlay || !this.player) return;
+    const state = this.player._state;
+    const duration = this.player.duration || state?.audioBuffer?.duration || 0;
+    const width = Math.max(1, state?.d?.spectrogramCanvas?.width || Math.floor(duration * (state?.pixelsPerSecond || 100)));
+    const height = Math.max(1, state?.d?.spectrogramCanvas?.height || 1);
+    this.overlay.style.width = `${width}px`;
+    this.overlay.style.height = `${height}px`;
+    this.overlay.innerHTML = "";
+    for (const label of this.labels) {
+      const el = this._createLabelElement(label, width, height);
+      this.overlay.appendChild(el);
+    }
+  }
+  _createLabelElement(label, canvasWidth, canvasHeight) {
+    const el = document.createElement("div");
+    el.className = "spectrogram-label-region";
+    if (this._liveLinkedId && label.id === this._liveLinkedId) el.classList.add("linked-live");
+    el.setAttribute("role", "button");
+    el.setAttribute("tabindex", "0");
+    this._applyGeometryToElement(el, this._toGeometry(label, canvasWidth, canvasHeight));
+    if (label.color) el.style.setProperty("--spectrogram-label-color", label.color);
+    el.dataset.id = label.id;
+    el.dataset.start = String(label.start);
+    el.dataset.end = String(label.end);
+    el.title = `${label.label || "Label"} ${label.start.toFixed(2)}s\u2013${label.end.toFixed(2)}s / ${Math.round(label.freqMin)}-${Math.round(label.freqMax)} Hz`;
+    el.innerHTML = `
+            <span class="spectrogram-label-text">${label.label || "Label"}</span>
+            <span class="spectrogram-label-meta">${Math.round(label.freqMin)}-${Math.round(label.freqMax)} Hz</span>
+            <span class="label-handle handle-tl" data-mode="resize-tl"></span>
+            <span class="label-handle handle-tr" data-mode="resize-tr"></span>
+            <span class="label-handle handle-bl" data-mode="resize-bl"></span>
+            <span class="label-handle handle-br" data-mode="resize-br"></span>
+            <span class="label-handle handle-l" data-mode="resize-l"></span>
+            <span class="label-handle handle-r" data-mode="resize-r"></span>
+            <span class="label-handle handle-t" data-mode="resize-t"></span>
+            <span class="label-handle handle-b" data-mode="resize-b"></span>
+        `;
+    el.addEventListener("click", (event) => {
+      if (performance.now() < this._suppressClickUntil) return;
+      event.stopPropagation();
+      event.preventDefault();
+      this.player?._state?._blockSeekClicks?.(260);
+      this.player?.playBandpassedSegment?.(
+        label.start,
+        label.end,
+        label.freqMin,
+        label.freqMax,
+        { labelId: label.id }
+      );
+    });
+    el.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      const handle = event.target?.closest?.(".label-handle");
+      const mode = handle?.dataset?.mode || "move";
+      this._startEditInteraction(label.id, mode, event.clientX, event.clientY, el);
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    return el;
+  }
+  _applyGeometryToElement(el, geometry) {
+    el.style.left = `${geometry.left}px`;
+    el.style.top = `${geometry.top}px`;
+    el.style.width = `${geometry.width}px`;
+    el.style.height = `${geometry.height}px`;
+  }
+  _toGeometry(label, canvasWidth, canvasHeight) {
+    const state = this.player?._state;
+    const duration = Math.max(1e-3, this.player?.duration || state?.audioBuffer?.duration || 1e-3);
+    const maxFreq = this._getMaxFreq();
+    const x1 = clamp(label.start / duration * canvasWidth, 0, canvasWidth);
+    const x2 = clamp(label.end / duration * canvasWidth, 0, canvasWidth);
+    const yHigh = clamp((1 - label.freqMax / maxFreq) * canvasHeight, 0, canvasHeight);
+    const yLow = clamp((1 - label.freqMin / maxFreq) * canvasHeight, 0, canvasHeight);
+    return {
+      left: Math.min(x1, x2),
+      top: Math.min(yHigh, yLow),
+      width: Math.max(1, Math.abs(x2 - x1)),
+      height: Math.max(1, Math.abs(yLow - yHigh))
+    };
+  }
+  _bindDrawingInteractions(wrapper) {
+    const onPointerDown = (e) => {
+      if (e.target?.closest?.(".spectrogram-label-region")) return;
+      if (!e.shiftKey || e.button !== 0) return;
+      if (!this.player?._state?.audioBuffer) return;
+      const start = this._clientXToTime(e.clientX);
+      const freq = this._clientYToFreq(e.clientY);
+      this._drawing = { startTime: start, startFreq: freq, endTime: start, endFreq: freq };
+      this._ensureDraft();
+      this._updateDraft();
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const onPointerMove = (e) => {
+      if (this._editing) {
+        this._updateEditInteraction(e.clientX, e.clientY);
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (this._drawing) {
+        this._drawing.endTime = this._clientXToTime(e.clientX);
+        this._drawing.endFreq = this._clientYToFreq(e.clientY);
+        this._updateDraft();
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    const onPointerUp = (e) => {
+      if (this._editing) {
+        this._finishEditInteraction();
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (this._drawing) {
+        const region = this._finalizeDraft();
+        if (region) this.add(region);
+        this._clearDraft();
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    wrapper.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("pointermove", onPointerMove, true);
+    document.addEventListener("pointerup", onPointerUp, true);
+    document.addEventListener("pointercancel", onPointerUp, true);
+    this._domCleanups.push(() => wrapper.removeEventListener("pointerdown", onPointerDown, true));
+    this._domCleanups.push(() => document.removeEventListener("pointermove", onPointerMove, true));
+    this._domCleanups.push(() => document.removeEventListener("pointerup", onPointerUp, true));
+    this._domCleanups.push(() => document.removeEventListener("pointercancel", onPointerUp, true));
+  }
+  _ensureDraft() {
+    if (!this.overlay || this._draftEl) return;
+    this._draftEl = document.createElement("div");
+    this._draftEl.className = "spectrogram-label-draft";
+    this.overlay.appendChild(this._draftEl);
+  }
+  _updateDraft() {
+    if (!this._drawing || !this._draftEl || !this.overlay) return;
+    const width = parseFloat(this.overlay.style.width) || 1;
+    const height = parseFloat(this.overlay.style.height) || 1;
+    const preview = this._normalize({
+      start: this._drawing.startTime,
+      end: this._drawing.endTime,
+      freqMin: Math.min(this._drawing.startFreq, this._drawing.endFreq),
+      freqMax: Math.max(this._drawing.startFreq, this._drawing.endFreq),
+      label: "New label"
+    });
+    const g = this._toGeometry(preview, width, height);
+    this._draftEl.style.left = `${g.left}px`;
+    this._draftEl.style.top = `${g.top}px`;
+    this._draftEl.style.width = `${g.width}px`;
+    this._draftEl.style.height = `${g.height}px`;
+  }
+  _finalizeDraft() {
+    if (!this._drawing) return null;
+    const region = this._normalize({
+      start: this._drawing.startTime,
+      end: this._drawing.endTime,
+      freqMin: Math.min(this._drawing.startFreq, this._drawing.endFreq),
+      freqMax: Math.max(this._drawing.startFreq, this._drawing.endFreq),
+      label: `Label ${this._counter++}`
+    });
+    const duration = Math.abs(region.end - region.start);
+    const freqSpan = Math.abs(region.freqMax - region.freqMin);
+    if (duration < 0.02 || freqSpan < 20) return null;
+    return region;
+  }
+  _clearDraft() {
+    this._drawing = null;
+    if (this._draftEl?.parentNode) this._draftEl.parentNode.removeChild(this._draftEl);
+    this._draftEl = null;
+  }
+  _startEditInteraction(labelId, mode, clientX, clientY, element) {
+    const label = this.labels.find((l) => l.id === labelId);
+    if (!label) return;
+    this._editing = {
+      id: labelId,
+      mode,
+      startX: clientX,
+      startY: clientY,
+      startLabel: { ...label },
+      element,
+      pending: mode === "move",
+      moved: mode !== "move",
+      forceSuppressClick: mode !== "move"
+    };
+    if (mode !== "move") element.classList.add("editing");
+  }
+  _updateEditInteraction(clientX, clientY) {
+    if (!this._editing) return;
+    const label = this.labels.find((l) => l.id === this._editing.id);
+    if (!label) return;
+    const duration = Math.max(1e-3, this.player?.duration || this.player?._state?.audioBuffer?.duration || 1e-3);
+    const maxFreq = this._getMaxFreq();
+    const width = Math.max(1, this.player?._state?.d?.spectrogramCanvas?.width || 1);
+    const height = Math.max(1, this.player?._state?.d?.spectrogramCanvas?.height || 1);
+    const dt = (clientX - this._editing.startX) / width * duration;
+    const df = -(clientY - this._editing.startY) / height * maxFreq;
+    const src = this._editing.startLabel;
+    if (this._editing.pending) {
+      if (Math.abs(clientX - this._editing.startX) < 4 && Math.abs(clientY - this._editing.startY) < 4) return;
+      this._editing.pending = false;
+      this._editing.moved = true;
+      this._editing.element?.classList?.add("editing");
+    }
+    let next = { ...label };
+    switch (this._editing.mode) {
+      case "move":
+        next.start = src.start + dt;
+        next.end = src.end + dt;
+        next.freqMin = src.freqMin + df;
+        next.freqMax = src.freqMax + df;
+        break;
+      case "resize-l":
+        next.start = src.start + dt;
+        break;
+      case "resize-r":
+        next.end = src.end + dt;
+        break;
+      case "resize-t":
+        next.freqMax = src.freqMax + df;
+        break;
+      case "resize-b":
+        next.freqMin = src.freqMin + df;
+        break;
+      case "resize-tl":
+        next.start = src.start + dt;
+        next.freqMax = src.freqMax + df;
+        break;
+      case "resize-tr":
+        next.end = src.end + dt;
+        next.freqMax = src.freqMax + df;
+        break;
+      case "resize-bl":
+        next.start = src.start + dt;
+        next.freqMin = src.freqMin + df;
+        break;
+      case "resize-br":
+        next.end = src.end + dt;
+        next.freqMin = src.freqMin + df;
+        break;
+      default:
+        break;
+    }
+    next = this._normalize({ ...src, ...next, id: src.id, label: src.label, color: src.color });
+    if (this._editing.mode === "move") {
+      const timeSpan = Math.max(0.01, src.end - src.start);
+      const freqSpan = Math.max(1, src.freqMax - src.freqMin);
+      next.end = next.start + timeSpan;
+      next.freqMax = next.freqMin + freqSpan;
+      if (next.end > duration) {
+        const shift = next.end - duration;
+        next.start = Math.max(0, next.start - shift);
+        next.end = duration;
+      }
+      if (next.freqMax > maxFreq) {
+        const shift = next.freqMax - maxFreq;
+        next.freqMin = Math.max(0, next.freqMin - shift);
+        next.freqMax = maxFreq;
+      }
+    }
+    Object.assign(label, next);
+    this.player?._state?.updateActiveSegmentFromLabel?.(label);
+    this.player?._emit?.("spectrogramlabelpreview", { label: { ...label } });
+    if (this._editing.element) {
+      this._editing.element.dataset.start = String(label.start);
+      this._editing.element.dataset.end = String(label.end);
+      this._editing.element.title = `${label.label || "Label"} ${label.start.toFixed(2)}s\u2013${label.end.toFixed(2)}s / ${Math.round(label.freqMin)}-${Math.round(label.freqMax)} Hz`;
+      const geometry = this._toGeometry(label, width, height);
+      this._applyGeometryToElement(this._editing.element, geometry);
+      const meta = this._editing.element.querySelector(".spectrogram-label-meta");
+      if (meta) meta.textContent = `${Math.round(label.freqMin)}-${Math.round(label.freqMax)} Hz`;
+    }
+  }
+  _finishEditInteraction() {
+    if (!this._editing) return;
+    const shouldSuppressClick = this._editing.forceSuppressClick || this._editing.moved;
+    this._editing.element?.classList?.remove("editing");
+    const label = this.labels.find((l) => l.id === this._editing.id);
+    if (label && this._editing.moved) this.player?._emit?.("spectrogramlabelupdate", { label });
+    this._editing = null;
+    if (shouldSuppressClick) {
+      this._suppressClickUntil = performance.now() + 250;
+      this.render();
+    }
+  }
+  _clientXToTime(clientX) {
+    return this.player?._state?._clientXToTime?.(clientX, "spectrogram") || 0;
+  }
+  _clientYToFreq(clientY) {
+    const state = this.player?._state;
+    const wrapper = state?.d?.canvasWrapper;
+    const canvas = state?.d?.spectrogramCanvas;
+    if (!wrapper || !canvas) return 0;
+    const rect = wrapper.getBoundingClientRect();
+    const y = clamp(clientY - rect.top, 0, Math.max(1, canvas.height));
+    const normalized = 1 - y / Math.max(1, canvas.height);
+    return normalized * this._getMaxFreq();
+  }
+  _getMaxFreq() {
+    const state = this.player?._state;
+    const selected = parseFloat(state?.d?.maxFreqSelect?.value || "10000");
+    const nyquist = (state?.sampleRateHz || 32e3) / 2;
+    return Math.max(1, Math.min(selected, nyquist));
+  }
+  _normalize(label) {
+    const start = Number(label?.start ?? 0);
+    const end = Number(label?.end ?? start);
+    const freqMin = Number(label?.freqMin ?? 0);
+    const freqMax = Number(label?.freqMax ?? freqMin);
+    if (![start, end, freqMin, freqMax].every(Number.isFinite)) {
+      throw new Error("SpectrogramLabelLayer: numeric start/end/freqMin/freqMax required");
+    }
+    const maxFreq = this._getMaxFreq();
+    const s = Math.max(0, Math.min(start, end));
+    const duration = Math.max(1e-3, this.player?.duration || this.player?._state?.audioBuffer?.duration || Math.max(start, end, 1e-3));
+    const e = Math.min(duration, Math.max(0, Math.max(start, end)));
+    const f0 = clamp(Math.min(freqMin, freqMax), 0, maxFreq);
+    const f1 = clamp(Math.max(freqMin, freqMax), 0, maxFreq);
+    return {
+      id: label?.id || `slabel_${Math.random().toString(36).slice(2, 10)}`,
+      start: s,
+      end: Math.max(s + 0.01, e),
+      freqMin: f0,
+      freqMax: Math.max(f0 + 1, f1),
+      label: label?.label || "",
+      color: label?.color || ""
+    };
+  }
+};
+
+// src/BirdNETPlayer.js
 var WAVESURFER_CDN = "https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.esm.js";
 var BirdNETPlayer = class {
   /**
@@ -2519,6 +4242,18 @@ var BirdNETPlayer = class {
     this.container = container;
     this.options = options;
     this._state = null;
+    this._events = new EventTarget();
+    this.annotations = new AnnotationLayer();
+    this.spectrogramLabels = new SpectrogramLabelLayer();
+    this._linkedLabels = /* @__PURE__ */ new Map();
+    this._isSyncingLabels = false;
+    this.on = (event, callback, options2) => {
+      this._events.addEventListener(event, callback, options2);
+      return () => this.off(event, callback, options2);
+    };
+    this.off = (event, callback, options2) => {
+      this._events.removeEventListener(event, callback, options2);
+    };
     this.ready = this._init();
   }
   // ── Initialization ──────────────────────────────────────────────
@@ -2529,8 +4264,20 @@ var BirdNETPlayer = class {
       /* @vite-ignore */
       WAVESURFER_CDN
     )).default;
-    this._state = new PlayerState(this.root, WaveSurfer);
+    this._state = new PlayerState(
+      this.root,
+      WaveSurfer,
+      (event, detail) => this._emit(event, detail),
+      this.options
+    );
+    this.annotations.attach(this);
+    this.spectrogramLabels.attach(this);
+    this._bindLinkedLabelSync();
+    this._emit("ready", { phase: "init" });
     return this;
+  }
+  _emit(event, detail = {}) {
+    this._events.dispatchEvent(new CustomEvent(event, { detail }));
   }
   // ── Public API ──────────────────────────────────────────────────
   /** Load audio from a URL (http, blob:, data: URLs all supported) */
@@ -2563,11 +4310,213 @@ var BirdNETPlayer = class {
   togglePlayPause() {
     this._state?._togglePlayPause();
   }
+  playSegment(startSec, endSec, options) {
+    this._state?.playSegment(startSec, endSec, options);
+  }
+  playBandpassedSegment(startSec, endSec, freqMinHz, freqMaxHz, options) {
+    this._state?.playBandpassedSegment(startSec, endSec, freqMinHz, freqMaxHz, options);
+  }
+  addAnnotation(annotation) {
+    const id = annotation?.id || `lbl_${Math.random().toString(36).slice(2, 10)}`;
+    const existing = this._linkedLabels.get(id);
+    const merged = this._normalizeLinkedLabel({
+      ...existing,
+      ...annotation,
+      id,
+      label: annotation?.label ?? annotation?.species ?? existing?.label ?? "Label"
+    });
+    this._linkedLabels.set(id, merged);
+    this._syncLinkedLabelsToLayers();
+    return id;
+  }
+  setAnnotations(annotations) {
+    const next = /* @__PURE__ */ new Map();
+    for (const ann of annotations || []) {
+      const id = ann?.id || `lbl_${Math.random().toString(36).slice(2, 10)}`;
+      const existing = this._linkedLabels.get(id);
+      next.set(id, this._normalizeLinkedLabel({
+        ...existing,
+        ...ann,
+        id,
+        label: ann?.label ?? ann?.species ?? existing?.label ?? "Label"
+      }));
+    }
+    this._linkedLabels = next;
+    this._syncLinkedLabelsToLayers();
+  }
+  clearAnnotations() {
+    this._linkedLabels.clear();
+    this._syncLinkedLabelsToLayers();
+  }
+  exportAnnotationsRaven() {
+    return this.annotations.exportRavenFormat(this._toAnnotationList());
+  }
+  addSpectrogramLabel(label) {
+    const id = label?.id || `lbl_${Math.random().toString(36).slice(2, 10)}`;
+    const existing = this._linkedLabels.get(id);
+    const merged = this._normalizeLinkedLabel({
+      ...existing,
+      ...label,
+      id,
+      species: label?.species ?? label?.label ?? existing?.species ?? "",
+      label: label?.label ?? existing?.label ?? label?.species ?? "Label"
+    });
+    this._linkedLabels.set(id, merged);
+    this._syncLinkedLabelsToLayers();
+    return id;
+  }
+  setSpectrogramLabels(labels) {
+    const next = /* @__PURE__ */ new Map();
+    for (const lbl of labels || []) {
+      const id = lbl?.id || `lbl_${Math.random().toString(36).slice(2, 10)}`;
+      const existing = this._linkedLabels.get(id);
+      next.set(id, this._normalizeLinkedLabel({
+        ...existing,
+        ...lbl,
+        id,
+        species: lbl?.species ?? lbl?.label ?? existing?.species ?? "",
+        label: lbl?.label ?? existing?.label ?? lbl?.species ?? "Label"
+      }));
+    }
+    this._linkedLabels = next;
+    this._syncLinkedLabelsToLayers();
+  }
+  clearSpectrogramLabels() {
+    this._linkedLabels.clear();
+    this._syncLinkedLabelsToLayers();
+  }
   /** Tear down the player and free resources */
   destroy() {
+    this.annotations.detach();
+    this.spectrogramLabels.detach();
     this._state?.dispose();
     this._state = null;
     this.container.innerHTML = "";
+  }
+  _bindLinkedLabelSync() {
+    this.on("annotationpreview", (e) => this._previewFromAnnotationEvent(e.detail.annotation));
+    this.on("spectrogramlabelpreview", (e) => this._previewFromSpectrogramEvent(e.detail.label));
+    this.on("annotationcreate", (e) => this._upsertFromAnnotationEvent(e.detail.annotation));
+    this.on("annotationupdate", (e) => this._upsertFromAnnotationEvent(e.detail.annotation));
+    this.on("spectrogramlabelcreate", (e) => this._upsertFromSpectrogramEvent(e.detail.label));
+    this.on("spectrogramlabelupdate", (e) => this._upsertFromSpectrogramEvent(e.detail.label));
+  }
+  _previewFromAnnotationEvent(annotation) {
+    if (this._isSyncingLabels || !annotation) return;
+    const id = annotation.id || `lbl_${Math.random().toString(36).slice(2, 10)}`;
+    const existing = this._linkedLabels.get(id);
+    const next = this._normalizeLinkedLabel({
+      ...existing,
+      ...annotation,
+      id,
+      label: annotation?.species ?? existing?.label ?? "Label"
+    });
+    this._linkedLabels.set(id, next);
+    this._state?.updateActiveSegmentFromLabel?.(next);
+    this.spectrogramLabels.setLiveLinkedId(id);
+    this.spectrogramLabels.set(this._toSpectrogramLabelList());
+  }
+  _previewFromSpectrogramEvent(label) {
+    if (this._isSyncingLabels || !label) return;
+    const id = label.id || `lbl_${Math.random().toString(36).slice(2, 10)}`;
+    const existing = this._linkedLabels.get(id);
+    const next = this._normalizeLinkedLabel({
+      ...existing,
+      ...label,
+      id,
+      species: existing?.species ?? label?.label ?? "",
+      label: label?.label ?? existing?.label ?? "Label"
+    });
+    this._linkedLabels.set(id, next);
+    this._state?.updateActiveSegmentFromLabel?.(next);
+    this.annotations.setLiveLinkedId(id);
+    this.annotations.set(this._toAnnotationList());
+  }
+  _upsertFromAnnotationEvent(annotation) {
+    if (this._isSyncingLabels || !annotation) return;
+    const id = annotation.id || `lbl_${Math.random().toString(36).slice(2, 10)}`;
+    const existing = this._linkedLabels.get(id);
+    const next = this._normalizeLinkedLabel({
+      ...existing,
+      ...annotation,
+      id,
+      label: annotation?.species ?? existing?.label ?? "Label"
+    });
+    this._linkedLabels.set(id, next);
+    this._state?.updateActiveSegmentFromLabel?.(next);
+    this.annotations.setLiveLinkedId(null);
+    this.spectrogramLabels.setLiveLinkedId(null);
+    this._syncLinkedLabelsToLayers();
+  }
+  _upsertFromSpectrogramEvent(label) {
+    if (this._isSyncingLabels || !label) return;
+    const id = label.id || `lbl_${Math.random().toString(36).slice(2, 10)}`;
+    const existing = this._linkedLabels.get(id);
+    const next = this._normalizeLinkedLabel({
+      ...existing,
+      ...label,
+      id,
+      species: existing?.species ?? label?.label ?? "",
+      label: label?.label ?? existing?.label ?? "Label"
+    });
+    this._linkedLabels.set(id, next);
+    this._state?.updateActiveSegmentFromLabel?.(next);
+    this.annotations.setLiveLinkedId(null);
+    this.spectrogramLabels.setLiveLinkedId(null);
+    this._syncLinkedLabelsToLayers();
+  }
+  _syncLinkedLabelsToLayers() {
+    this._isSyncingLabels = true;
+    try {
+      this.annotations.set(this._toAnnotationList());
+      this.spectrogramLabels.set(this._toSpectrogramLabelList());
+    } finally {
+      this._isSyncingLabels = false;
+    }
+  }
+  _toAnnotationList() {
+    return Array.from(this._linkedLabels.values()).map((l) => ({
+      id: l.id,
+      start: l.start,
+      end: l.end,
+      species: l.species || l.label || "",
+      confidence: l.confidence,
+      color: l.color
+    }));
+  }
+  _toSpectrogramLabelList() {
+    return Array.from(this._linkedLabels.values()).map((l) => ({
+      id: l.id,
+      start: l.start,
+      end: l.end,
+      freqMin: l.freqMin,
+      freqMax: l.freqMax,
+      label: l.label || l.species || "",
+      color: l.color
+    }));
+  }
+  _normalizeLinkedLabel(label) {
+    const duration = Math.max(1e-3, this.duration || this._state?.audioBuffer?.duration || 1e-3);
+    const nyquist = (this._state?.sampleRateHz || 32e3) / 2;
+    const selected = parseFloat(this._state?.d?.maxFreqSelect?.value || `${nyquist}`);
+    const maxFreq = Math.max(1, Math.min(selected, nyquist));
+    const start = Math.max(0, Math.min(Number(label?.start ?? 0), duration));
+    const end = Math.max(start + 0.01, Math.min(duration, Number(label?.end ?? start + 0.01)));
+    const freqMinRaw = Number(label?.freqMin ?? 0);
+    const freqMaxRaw = Number(label?.freqMax ?? maxFreq);
+    const freqMin = Math.max(0, Math.min(freqMinRaw, maxFreq));
+    const freqMax = Math.max(freqMin + 1, Math.min(maxFreq, freqMaxRaw));
+    return {
+      id: label?.id || `lbl_${Math.random().toString(36).slice(2, 10)}`,
+      start,
+      end,
+      freqMin,
+      freqMax,
+      species: label?.species || "",
+      label: label?.label || label?.species || "",
+      confidence: label?.confidence,
+      color: label?.color || ""
+    };
   }
 };
 export {
