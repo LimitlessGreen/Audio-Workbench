@@ -45,6 +45,7 @@ export function renderMainWaveform({
     pixelsPerSecond,
     waveformHeight = 100,
     amplitudePeakAbs,
+    showTimeline = true,
 }) {
     if (!audioBuffer) return;
 
@@ -54,13 +55,14 @@ export function renderMainWaveform({
 
     const width = Math.max(1, Math.floor(audioBuffer.duration * pixelsPerSecond));
     const clampedWaveformHeight = Math.max(64, Math.floor(waveformHeight));
-    const timelineHeight = Math.max(18, Math.min(32, Math.round(clampedWaveformHeight * 0.22)));
+    const timelineHeight = showTimeline ? Math.max(18, Math.min(32, Math.round(clampedWaveformHeight * 0.22))) : 0;
     const ampHeight = Math.max(32, clampedWaveformHeight - timelineHeight);
 
     amplitudeCanvas.width = width;
     amplitudeCanvas.height = ampHeight;
     waveformTimelineCanvas.width = width;
     waveformTimelineCanvas.height = timelineHeight;
+    waveformTimelineCanvas.style.display = showTimeline ? 'block' : 'none';
     waveformContent.style.width = `${width}px`;
 
     const channelData = audioBuffer.getChannelData(0);
@@ -105,13 +107,15 @@ export function renderMainWaveform({
         ampCtx.stroke();
     }
 
-    drawWaveformTimeline({
-        ctx: timelineCtx,
-        width,
-        height: timelineHeight,
-        duration: audioBuffer.duration,
-        pixelsPerSecond,
-    });
+    if (showTimeline && timelineHeight > 0) {
+        drawWaveformTimeline({
+            ctx: timelineCtx,
+            width,
+            height: timelineHeight,
+            duration: audioBuffer.duration,
+            pixelsPerSecond,
+        });
+    }
 }
 
 // ─── Overview Waveform ──────────────────────────────────────────────

@@ -14,6 +14,12 @@ import { PlayerState } from './PlayerState.js';
 import { AnnotationLayer, SpectrogramLabelLayer } from './annotations.js';
 
 const WAVESURFER_CDN = 'https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.esm.js';
+const DEFAULT_LABEL_TAXONOMY = [
+    { name: 'Bird Call', color: '#0ea5e9', shortcut: '1' },
+    { name: 'Song', color: '#22c55e', shortcut: '2' },
+    { name: 'Chirp', color: '#f59e0b', shortcut: '3' },
+    { name: 'Noise', color: '#ef4444', shortcut: '4' },
+];
 
 export { DEFAULT_OPTIONS };
 
@@ -31,6 +37,21 @@ export class BirdNETPlayer {
      * @param {boolean}     [options.showFFTControls] — show FFT/Freq/Color selects (default: true)
      * @param {boolean}     [options.showDisplayGain] — show Floor/Ceil sliders (default: true)
      * @param {boolean}     [options.showStatusbar]   — show bottom status bar (default: true)
+     * @param {boolean}     [options.showOverview]    — show overview navigator (default: true)
+     * @param {'both'|'waveform'|'spectrogram'} [options.viewMode] — visible analysis view(s) (default: both)
+     * @param {'default'|'hero'} [options.transportStyle] — transport button style (default: default)
+     * @param {boolean}     [options.transportOverlay] — centered play overlay without toolbar height (default: false)
+     * @param {boolean}     [options.showWaveformTimeline] — show bottom waveform timeline (default: true)
+     * @param {number}      [options.followGuardLeftRatio] — left follow guard ratio (default: 0.35)
+     * @param {number}      [options.followGuardRightRatio] — right follow guard ratio (default: 0.65)
+     * @param {number}      [options.followTargetRatio] — target ratio for viewport centering (default: 0.5)
+     * @param {number}      [options.followCatchupDurationMs] — follow catchup tween duration (default: 240)
+     * @param {number}      [options.followCatchupSeekDurationMs] — slower follow tween after manual seek (default: 360)
+     * @param {number}      [options.smoothLerp] — smooth mode lerp factor (default: 0.18)
+     * @param {number}      [options.smoothSeekLerp] — smooth mode lerp after manual seek (default: 0.08)
+     * @param {number}      [options.smoothMinStepRatio] — smooth min step ratio (default: 0.03)
+     * @param {number}      [options.smoothSeekMinStepRatio] — smooth min step ratio after seek (default: 0.008)
+     * @param {number}      [options.smoothSeekFocusMs] — slow-follow window after manual seek (default: 1400)
      */
     constructor(container, options = {}) {
         if (!container) throw new Error('BirdNETPlayer: container element required');
@@ -42,6 +63,10 @@ export class BirdNETPlayer {
         this.spectrogramLabels = new SpectrogramLabelLayer();
         this._linkedLabels = new Map();
         this._isSyncingLabels = false;
+        this._labelLibrary = new Map();
+        this._labelTaxonomy = this._normalizeTaxonomy(options.labelTaxonomy || DEFAULT_LABEL_TAXONOMY);
+        this._activeLabelId = null;
+        this._globalKeyHandler = null;
 
         this.on = (event, callback, options) => {
             this._events.addEventListener(event, callback, options);
@@ -77,6 +102,7 @@ export class BirdNETPlayer {
         this.annotations.attach(this);
         this.spectrogramLabels.attach(this);
         this._bindLinkedLabelSync();
+        this._bindGlobalHotkeys();
         this._emit('ready', { phase: 'init' });
         return this;
     }
@@ -186,9 +212,74 @@ export class BirdNETPlayer {
         this._linkedLabels.clear();
         this._syncLinkedLabelsToLayers();
     }
+    renameLabel(id, name) {
+        const key = String(id || '').trim();
+        const value = String(name || '').trim();
+        if (!key || !value) return false;
+        const current = this._linkedLabels.get(key);
+        if (!current) return false;
+        this._linkedLabels.set(key, this._normalizeLinkedLabel({
+            ...current,
+            id: key,
+            label: value,
+            species: value,
+        }));
+        this._syncLinkedLabelsToLayers();
+        return true;
+    }
+    getLabelSuggestions(prefix = '', limit = 10) {
+        const q = String(prefix || '').trim().toLowerCase();
+        const ranked = Array.from(this._labelLibrary.entries())
+            .filter(([name]) => !q || name.toLowerCase().includes(q))
+            .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+            .slice(0, Math.max(1, limit))
+            .map(([name]) => name);
+        return ranked;
+    }
+    getLabelTaxonomy() {
+        return this._labelTaxonomy.map((item) => ({ ...item }));
+    }
+    setLabelTaxonomy(taxonomy = []) {
+        this._labelTaxonomy = this._normalizeTaxonomy(taxonomy);
+        this._syncLinkedLabelsToLayers();
+    }
+    applyTaxonomyToLabel(id, shortcutOrIndex) {
+        const key = String(id || '').trim();
+        const current = this._linkedLabels.get(key);
+        if (!current) return false;
+
+        const index = typeof shortcutOrIndex === 'number'
+            ? shortcutOrIndex
+            : this._labelTaxonomy.findIndex((t) => t.shortcut === String(shortcutOrIndex));
+        if (index < 0 || index >= this._labelTaxonomy.length) return false;
+        const tax = this._labelTaxonomy[index];
+
+        const next = this._normalizeLinkedLabel({
+            ...current,
+            id: key,
+            label: tax.name,
+            species: tax.name,
+            color: tax.color || current.color,
+        });
+        this._linkedLabels.set(key, next);
+        this._activeLabelId = key;
+        this._syncLinkedLabelsToLayers();
+        this._emit('labeltaxonomyapply', { id: key, taxonomy: { ...tax } });
+        return true;
+    }
+    setPlaybackViewportConfig(config = {}) {
+        return this._state?.updatePlaybackViewportConfig?.(config) || null;
+    }
+    getPlaybackViewportConfig() {
+        return this._state?.getPlaybackViewportConfig?.() || null;
+    }
 
     /** Tear down the player and free resources */
     destroy() {
+        if (this._globalKeyHandler) {
+            document.removeEventListener('keydown', this._globalKeyHandler, true);
+            this._globalKeyHandler = null;
+        }
         this.annotations.detach();
         this.spectrogramLabels.detach();
         this._state?.dispose();
@@ -197,12 +288,32 @@ export class BirdNETPlayer {
     }
 
     _bindLinkedLabelSync() {
+        this.on('labelfocus', (e) => {
+            const id = String(e?.detail?.id || '').trim();
+            this._activeLabelId = id || null;
+        });
         this.on('annotationpreview', (e) => this._previewFromAnnotationEvent(e.detail.annotation));
         this.on('spectrogramlabelpreview', (e) => this._previewFromSpectrogramEvent(e.detail.label));
         this.on('annotationcreate', (e) => this._upsertFromAnnotationEvent(e.detail.annotation));
         this.on('annotationupdate', (e) => this._upsertFromAnnotationEvent(e.detail.annotation));
         this.on('spectrogramlabelcreate', (e) => this._upsertFromSpectrogramEvent(e.detail.label));
         this.on('spectrogramlabelupdate', (e) => this._upsertFromSpectrogramEvent(e.detail.label));
+    }
+
+    _bindGlobalHotkeys() {
+        this._globalKeyHandler = (event) => {
+            if (!this._activeLabelId) return;
+            const tag = event?.target?.tagName?.toLowerCase?.() || '';
+            const typing = tag === 'input' || tag === 'textarea' || event?.target?.isContentEditable;
+            if (typing) return;
+            const key = String(event.key || '');
+            if (!/^[1-9]$/.test(key)) return;
+            const idx = Number(key) - 1;
+            if (idx >= this._labelTaxonomy.length) return;
+            event.preventDefault();
+            this.applyTaxonomyToLabel(this._activeLabelId, idx);
+        };
+        document.addEventListener('keydown', this._globalKeyHandler, true);
     }
 
     _previewFromAnnotationEvent(annotation) {
@@ -278,9 +389,39 @@ export class BirdNETPlayer {
         try {
             this.annotations.set(this._toAnnotationList());
             this.spectrogramLabels.set(this._toSpectrogramLabelList());
+            this._rebuildLabelLibrary();
         } finally {
             this._isSyncingLabels = false;
         }
+    }
+
+    _rebuildLabelLibrary() {
+        const next = new Map();
+        for (const item of this._linkedLabels.values()) {
+            const label = String(item?.label || item?.species || '').trim();
+            if (!label) continue;
+            next.set(label, (next.get(label) || 0) + 1);
+        }
+        this._labelLibrary = next;
+    }
+
+    _normalizeTaxonomy(taxonomy) {
+        const used = new Set();
+        const list = [];
+        for (const item of taxonomy || []) {
+            const name = String(item?.name || '').trim();
+            if (!name) continue;
+            const shortcut = String(item?.shortcut || '').trim();
+            const normalizedShortcut = /^[1-9]$/.test(shortcut) && !used.has(shortcut) ? shortcut : '';
+            if (normalizedShortcut) used.add(normalizedShortcut);
+            list.push({
+                name,
+                color: item?.color ? String(item.color) : '',
+                shortcut: normalizedShortcut,
+            });
+            if (list.length >= 9) break;
+        }
+        return list;
     }
 
     _toAnnotationList() {
@@ -318,6 +459,10 @@ export class BirdNETPlayer {
         const freqMaxRaw = Number(label?.freqMax ?? maxFreq);
         const freqMin = Math.max(0, Math.min(freqMinRaw, maxFreq));
         const freqMax = Math.max(freqMin + 1, Math.min(maxFreq, freqMaxRaw));
+        const labelName = String(label?.label || label?.species || '').trim();
+        const tax = labelName
+            ? this._labelTaxonomy.find((t) => t.name.toLowerCase() === labelName.toLowerCase())
+            : null;
 
         return {
             id: label?.id || `lbl_${Math.random().toString(36).slice(2, 10)}`,
@@ -328,7 +473,7 @@ export class BirdNETPlayer {
             species: label?.species || '',
             label: label?.label || label?.species || '',
             confidence: label?.confidence,
-            color: label?.color || '',
+            color: label?.color || tax?.color || '',
         };
     }
 }

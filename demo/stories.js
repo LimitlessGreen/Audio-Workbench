@@ -29,6 +29,153 @@ async function createStoryPlayer(root, options = {}, audioUrl = null, afterReady
 
 export const stories = [
     {
+        id: 'live-controls',
+        title: 'Live Controls Playground',
+        description: 'UI-Sektionen in Echtzeit an/aus schalten (Storybook-Style).',
+        async run(root) {
+            root.innerHTML = '';
+            const shell = document.createElement('div');
+            shell.style.display = 'grid';
+            shell.style.gridTemplateColumns = '280px 1fr';
+            shell.style.gap = '12px';
+            root.appendChild(shell);
+
+            const controls = document.createElement('div');
+            controls.style.border = '1px solid #d5ddea';
+            controls.style.borderRadius = '12px';
+            controls.style.background = '#fff';
+            controls.style.padding = '12px';
+            controls.style.display = 'grid';
+            controls.style.gap = '8px';
+            controls.style.alignContent = 'start';
+            shell.appendChild(controls);
+
+            const stage = document.createElement('div');
+            shell.appendChild(stage);
+
+            const options = {
+                showFileOpen: true,
+                showTransport: true,
+                showTime: true,
+                showVolume: true,
+                showViewToggles: true,
+                showZoom: true,
+                showFFTControls: true,
+                showDisplayGain: true,
+                showStatusbar: true,
+                showOverview: true,
+                viewMode: 'both',
+                transportStyle: 'default',
+                transportOverlay: false,
+                height: 520,
+            };
+
+            let mountedPlayer = null;
+            const mount = async () => {
+                if (mountedPlayer) mountedPlayer.destroy();
+                mountedPlayer = await createStoryPlayer(stage, options, SAMPLE_BIRD);
+            };
+
+            const title = document.createElement('div');
+            title.textContent = 'Visible Sections';
+            title.style.fontWeight = '700';
+            title.style.marginBottom = '4px';
+            controls.appendChild(title);
+
+            const boolKeys = [
+                'showFileOpen', 'showTransport', 'showTime', 'showVolume',
+                'showViewToggles', 'showZoom', 'showFFTControls',
+                'showDisplayGain', 'showStatusbar', 'showOverview',
+            ];
+            boolKeys.forEach((key) => {
+                const row = document.createElement('label');
+                row.style.display = 'flex';
+                row.style.alignItems = 'center';
+                row.style.gap = '8px';
+                row.style.fontSize = '13px';
+                row.style.cursor = 'pointer';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = options[key];
+                cb.addEventListener('change', async () => {
+                    options[key] = cb.checked;
+                    await mount();
+                });
+                const text = document.createElement('span');
+                text.textContent = key;
+                row.appendChild(cb);
+                row.appendChild(text);
+                controls.appendChild(row);
+            });
+
+            const makeSelectRow = (labelText, values, value, onChange) => {
+                const row = document.createElement('label');
+                row.style.display = 'grid';
+                row.style.gap = '4px';
+                row.style.fontSize = '13px';
+                const text = document.createElement('span');
+                text.textContent = labelText;
+                const select = document.createElement('select');
+                select.style.height = '30px';
+                select.style.border = '1px solid #d5ddea';
+                select.style.borderRadius = '8px';
+                select.style.padding = '0 8px';
+                values.forEach((item) => {
+                    const opt = document.createElement('option');
+                    opt.value = item;
+                    opt.textContent = item;
+                    select.appendChild(opt);
+                });
+                select.value = value;
+                select.addEventListener('change', async () => {
+                    onChange(select.value);
+                    await mount();
+                });
+                row.appendChild(text);
+                row.appendChild(select);
+                controls.appendChild(row);
+            };
+
+            makeSelectRow('View Mode', ['both', 'waveform', 'spectrogram'], options.viewMode, (value) => {
+                options.viewMode = value;
+            });
+            makeSelectRow('Transport Style', ['default', 'hero'], options.transportStyle, (value) => {
+                options.transportStyle = value;
+            });
+            makeSelectRow('Transport Overlay', ['false', 'true'], String(options.transportOverlay), (value) => {
+                options.transportOverlay = value === 'true';
+            });
+
+            const sizeRow = document.createElement('label');
+            sizeRow.style.display = 'grid';
+            sizeRow.style.gap = '4px';
+            sizeRow.style.fontSize = '13px';
+            const sizeText = document.createElement('span');
+            sizeText.textContent = `Height (${options.height}px)`;
+            const sizeRange = document.createElement('input');
+            sizeRange.type = 'range';
+            sizeRange.min = '220';
+            sizeRange.max = '620';
+            sizeRange.step = '10';
+            sizeRange.value = String(options.height);
+            sizeRange.addEventListener('input', async () => {
+                options.height = Number(sizeRange.value);
+                sizeText.textContent = `Height (${options.height}px)`;
+                await mount();
+            });
+            sizeRow.appendChild(sizeText);
+            sizeRow.appendChild(sizeRange);
+            controls.appendChild(sizeRow);
+
+            await mount();
+            return {
+                destroy() {
+                    mountedPlayer?.destroy();
+                },
+            };
+        },
+    },
+    {
         id: 'minimal',
         title: 'Minimal Player',
         description: 'Nur File-Open + Transport + Timeline.',
@@ -84,6 +231,93 @@ export const stories = [
                 showViewToggles: false,
                 height: 320,
             }, SAMPLE_TONE);
+        },
+    },
+    {
+        id: 'preview-waveform-hero',
+        title: 'Preview Waveform Hero',
+        description: 'Kleines Vorschaufenster mit nur Waveform + großem Play-Button.',
+        async run(root) {
+            root.innerHTML = '';
+            const host = document.createElement('div');
+            host.style.width = '560px';
+            host.style.maxWidth = '92vw';
+            root.appendChild(host);
+            return createStoryPlayer(host, {
+                height: 240,
+                viewMode: 'waveform',
+                showOverview: false,
+                showFileOpen: false,
+                showTime: false,
+                showVolume: false,
+                showViewToggles: false,
+                showZoom: false,
+                showFFTControls: false,
+                showDisplayGain: false,
+                showStatusbar: false,
+                transportStyle: 'hero',
+                transportOverlay: true,
+            }, SAMPLE_BIRD, async (player) => {
+                player._state._setPixelsPerSecond(220, true);
+            });
+        },
+    },
+    {
+        id: 'preview-spectrogram-hero',
+        title: 'Preview Spectrogram Hero',
+        description: 'Kleines Vorschaufenster mit nur Spektrogramm + großem Play-Button.',
+        async run(root) {
+            root.innerHTML = '';
+            const host = document.createElement('div');
+            host.style.width = '560px';
+            host.style.maxWidth = '92vw';
+            root.appendChild(host);
+            return createStoryPlayer(host, {
+                height: 240,
+                viewMode: 'spectrogram',
+                showOverview: false,
+                showFileOpen: false,
+                showTime: false,
+                showVolume: false,
+                showViewToggles: false,
+                showZoom: false,
+                showFFTControls: false,
+                showDisplayGain: false,
+                showStatusbar: false,
+                transportStyle: 'hero',
+                transportOverlay: true,
+            }, SAMPLE_SWEEP, async (player) => {
+                player._state._setPixelsPerSecond(220, true);
+            });
+        },
+    },
+    {
+        id: 'preview-ultra-compact-hero',
+        title: 'Preview Ultra Compact Hero',
+        description: 'Sehr kleines Vorschaufenster für enge Embeds.',
+        async run(root) {
+            root.innerHTML = '';
+            const host = document.createElement('div');
+            host.style.width = '360px';
+            host.style.maxWidth = '92vw';
+            root.appendChild(host);
+            return createStoryPlayer(host, {
+                height: 180,
+                viewMode: 'spectrogram',
+                showOverview: false,
+                showFileOpen: false,
+                showTime: false,
+                showVolume: false,
+                showViewToggles: false,
+                showZoom: false,
+                showFFTControls: false,
+                showDisplayGain: false,
+                showStatusbar: false,
+                transportStyle: 'hero',
+                transportOverlay: true,
+            }, SAMPLE_BIRD, async (player) => {
+                player._state._setPixelsPerSecond(260, true);
+            });
         },
     },
     {

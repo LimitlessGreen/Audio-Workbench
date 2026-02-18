@@ -1,4 +1,4 @@
-export function renderMainWaveform({ audioBuffer, amplitudeCanvas, waveformTimelineCanvas, waveformContent, pixelsPerSecond, waveformHeight, amplitudePeakAbs, }: {
+export function renderMainWaveform({ audioBuffer, amplitudeCanvas, waveformTimelineCanvas, waveformContent, pixelsPerSecond, waveformHeight, amplitudePeakAbs, showTimeline, }: {
     audioBuffer: any;
     amplitudeCanvas: any;
     waveformTimelineCanvas: any;
@@ -6,6 +6,7 @@ export function renderMainWaveform({ audioBuffer, amplitudeCanvas, waveformTimel
     pixelsPerSecond: any;
     waveformHeight?: number;
     amplitudePeakAbs: any;
+    showTimeline?: boolean;
 }): void;
 export function renderOverviewWaveform({ audioBuffer, overviewCanvas, overviewContainer, amplitudePeakAbs, }: {
     audioBuffer: any;

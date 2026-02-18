@@ -42,13 +42,51 @@ var BirdNETPlayerModule = (() => {
     // FFT size, Freq, AF, Color
     showDisplayGain: true,
     // Floor / Ceil / AC sliders
-    showStatusbar: true
+    showStatusbar: true,
     // Bottom status bar
+    showOverview: true,
+    // Bottom overview navigator
+    viewMode: "both",
+    // both | waveform | spectrogram
+    transportStyle: "default",
+    // default | hero
+    transportOverlay: false,
+    // Overlay mode: centered play button without toolbar height
+    showWaveformTimeline: true,
+    // Draw bottom timeline row in waveform view
+    followGuardLeftRatio: 0.35,
+    // Follow mode lower guard (0..1)
+    followGuardRightRatio: 0.65,
+    // Follow mode upper guard (0..1)
+    followTargetRatio: 0.5,
+    // Viewport target position for catchup
+    followCatchupDurationMs: 240,
+    // Follow catchup animation duration
+    followCatchupSeekDurationMs: 360,
+    // Follow catchup duration after manual seek
+    smoothLerp: 0.18,
+    // Smooth mode interpolation factor
+    smoothSeekLerp: 0.08,
+    // Smooth mode interpolation after manual seek
+    smoothMinStepRatio: 0.03,
+    // Smooth mode minimum step ratio
+    smoothSeekMinStepRatio: 8e-3,
+    // Smooth mode minimum step ratio after seek
+    smoothSeekFocusMs: 1400
+    // Slow-follow focus window after manual seek
   };
   function createPlayerHTML(opts = {}) {
     const o = { ...DEFAULT_OPTIONS, ...opts };
     const hide = (flag) => flag ? "" : ' style="display:none"';
-    return `<div class="daw-shell">
+    const viewMode = ["both", "waveform", "spectrogram"].includes(o.viewMode) ? o.viewMode : "both";
+    const transportStyle = o.transportStyle === "hero" ? "hero" : "default";
+    const shellClass = [
+      "daw-shell",
+      `view-mode-${viewMode}`,
+      `transport-style-${transportStyle}`,
+      o.transportOverlay ? "transport-overlay" : ""
+    ].join(" ");
+    return `<div class="${shellClass}">
 
     <!-- \u2550\u2550\u2550 Top Toolbar \u2550\u2550\u2550 -->
     <div class="toolbar">
@@ -102,7 +140,7 @@ var BirdNETPlayerModule = (() => {
 
         <!-- Toggle tools -->
         <span${hide(o.showViewToggles)}>
-            <button class="toolbar-btn toggle-btn active" id="followToggleBtn" disabled title="Playhead folgen">Follow</button>
+            <button class="toolbar-btn toggle-btn active" id="followToggleBtn" disabled title="Free / Follow / Smooth umschalten">Follow</button>
             <button class="toolbar-btn toggle-btn" id="loopToggleBtn" disabled title="Loop">Loop</button>
             <button class="toolbar-btn" id="fitViewBtn" disabled title="Fit to view">Fit</button>
             <button class="toolbar-btn" id="resetViewBtn" disabled title="Reset zoom">Reset</button>
@@ -210,7 +248,7 @@ var BirdNETPlayerModule = (() => {
         </div>
 
         <!-- Overview -->
-        <div class="overview-container" id="overviewContainer">
+        <div class="overview-container" id="overviewContainer"${hide(o.showOverview)}>
             <canvas id="overviewCanvas"></canvas>
             <div class="overview-window" id="overviewWindow">
                 <div class="handle left" id="overviewHandleLeft"></div>
@@ -1682,7 +1720,8 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     waveformContent,
     pixelsPerSecond,
     waveformHeight = 100,
-    amplitudePeakAbs
+    amplitudePeakAbs,
+    showTimeline = true
   }) {
     if (!audioBuffer) return;
     const ampCtx = amplitudeCanvas.getContext("2d");
@@ -1690,12 +1729,13 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     if (!ampCtx || !timelineCtx) return;
     const width = Math.max(1, Math.floor(audioBuffer.duration * pixelsPerSecond));
     const clampedWaveformHeight = Math.max(64, Math.floor(waveformHeight));
-    const timelineHeight = Math.max(18, Math.min(32, Math.round(clampedWaveformHeight * 0.22)));
+    const timelineHeight = showTimeline ? Math.max(18, Math.min(32, Math.round(clampedWaveformHeight * 0.22))) : 0;
     const ampHeight = Math.max(32, clampedWaveformHeight - timelineHeight);
     amplitudeCanvas.width = width;
     amplitudeCanvas.height = ampHeight;
     waveformTimelineCanvas.width = width;
     waveformTimelineCanvas.height = timelineHeight;
+    waveformTimelineCanvas.style.display = showTimeline ? "block" : "none";
     waveformContent.style.width = `${width}px`;
     const channelData = audioBuffer.getChannelData(0);
     const totalSamples = channelData.length;
@@ -1736,13 +1776,15 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       ampCtx.lineTo(x + 0.5, (1 + max) * midY);
       ampCtx.stroke();
     }
-    drawWaveformTimeline({
-      ctx: timelineCtx,
-      width,
-      height: timelineHeight,
-      duration: audioBuffer.duration,
-      pixelsPerSecond
-    });
+    if (showTimeline && timelineHeight > 0) {
+      drawWaveformTimeline({
+        ctx: timelineCtx,
+        width,
+        height: timelineHeight,
+        duration: audioBuffer.duration,
+        pixelsPerSecond
+      });
+    }
   }
   function renderOverviewWaveform({
     audioBuffer,
@@ -1812,6 +1854,11 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       });
     }
   }
+  function clampNumber(value, min, max, fallback) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, n));
+  }
   var PlayerState = class {
     constructor(container, WaveSurfer, emitHostEvent = null, options = {}) {
       if (!container) throw new Error("PlayerState: container element required");
@@ -1821,6 +1868,13 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       this.WaveSurfer = WaveSurfer;
       this._emitHostEvent = typeof emitHostEvent === "function" ? emitHostEvent : null;
       this.options = options || {};
+      this._viewMode = this.options.viewMode === "waveform" || this.options.viewMode === "spectrogram" ? this.options.viewMode : "both";
+      this._showWaveform = this._viewMode !== "spectrogram";
+      this._showSpectrogram = this._viewMode !== "waveform";
+      this._showOverview = this.options.showOverview !== false;
+      this._transportOverlay = this.options.transportOverlay === true;
+      this._showWaveformTimeline = this.options.showWaveformTimeline !== false && !(this.options.transportOverlay && this._viewMode === "waveform");
+      this._playbackViewportConfig = this._sanitizePlaybackViewportConfig(this.options || {});
       this.processor = createSpectrogramProcessor();
       this.colorizer = new GpuColorizer();
       this.audioBuffer = null;
@@ -1845,6 +1899,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       this.scrollSyncLock = false;
       this.windowStartNorm = 0;
       this.windowEndNorm = 1;
+      this.followMode = "follow";
       this.followPlayback = true;
       this.loopPlayback = false;
       this.playbackMode = "normal";
@@ -1856,6 +1911,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       this._suppressNextPauseHandler = false;
       this._segmentPlayToken = 0;
       this._customSegmentPlayback = null;
+      this._smoothSeekFocusUntil = 0;
       this._lastTimeupdateEmitAt = 0;
       this._lastSelectionEmitAt = 0;
       this._lastSelectionStart = NaN;
@@ -1865,6 +1921,8 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       this._lastTimeReadoutText = "";
       this._uiFrameId = 0;
       this._uiPending = null;
+      this._followCatchupRafId = 0;
+      this._followCatchupAnim = null;
       this._perf = {
         enabled: false,
         panel: null,
@@ -1918,6 +1976,33 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     _emit(event, detail = {}) {
       if (!this._emitHostEvent) return;
       this._emitHostEvent(event, detail);
+    }
+    _sanitizePlaybackViewportConfig(partial = {}) {
+      const cfg = this._playbackViewportConfig || {};
+      return {
+        followGuardLeftRatio: clampNumber(partial.followGuardLeftRatio, 0.05, 0.95, cfg.followGuardLeftRatio ?? 0.35),
+        followGuardRightRatio: clampNumber(partial.followGuardRightRatio, 0.05, 0.95, cfg.followGuardRightRatio ?? 0.65),
+        followTargetRatio: clampNumber(partial.followTargetRatio, 0.1, 0.9, cfg.followTargetRatio ?? 0.5),
+        followCatchupDurationMs: clampNumber(partial.followCatchupDurationMs, 80, 2500, cfg.followCatchupDurationMs ?? 240),
+        followCatchupSeekDurationMs: clampNumber(partial.followCatchupSeekDurationMs, 100, 3e3, cfg.followCatchupSeekDurationMs ?? 360),
+        smoothLerp: clampNumber(partial.smoothLerp, 0.02, 0.95, cfg.smoothLerp ?? 0.18),
+        smoothSeekLerp: clampNumber(partial.smoothSeekLerp, 0.01, 0.9, cfg.smoothSeekLerp ?? 0.08),
+        smoothMinStepRatio: clampNumber(partial.smoothMinStepRatio, 1e-3, 0.25, cfg.smoothMinStepRatio ?? 0.03),
+        smoothSeekMinStepRatio: clampNumber(partial.smoothSeekMinStepRatio, 1e-3, 0.2, cfg.smoothSeekMinStepRatio ?? 8e-3),
+        smoothSeekFocusMs: clampNumber(partial.smoothSeekFocusMs, 150, 5e3, cfg.smoothSeekFocusMs ?? 1400)
+      };
+    }
+    updatePlaybackViewportConfig(partial = {}) {
+      this._playbackViewportConfig = this._sanitizePlaybackViewportConfig(partial);
+      if (this._playbackViewportConfig.followGuardLeftRatio >= this._playbackViewportConfig.followGuardRightRatio) {
+        this._playbackViewportConfig.followGuardLeftRatio = 0.35;
+        this._playbackViewportConfig.followGuardRightRatio = 0.65;
+      }
+      this._emit("followconfigchange", { ...this._playbackViewportConfig });
+      return { ...this._playbackViewportConfig };
+    }
+    getPlaybackViewportConfig() {
+      return { ...this._playbackViewportConfig };
     }
     _initPerfOverlay() {
       const byOption = this.options?.enablePerfOverlay === true;
@@ -2099,6 +2184,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     // ═════════════════════════════════════════════════════════════════
     dispose() {
       this._stopCustomSegmentPlayback("stopped", this._getCurrentTime());
+      this._cancelFollowCatchupAnimation();
       if (this._viewResizeFrameId) {
         cancelAnimationFrame(this._viewResizeFrameId);
         this._viewResizeFrameId = 0;
@@ -2600,6 +2686,9 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     }
     _seekToTime(timeSec, centerView = false, options = {}) {
       if (!this.audioBuffer) return;
+      if (options.userInitiated) {
+        this._smoothSeekFocusUntil = performance.now() + this._playbackViewportConfig.smoothSeekFocusMs;
+      }
       if (this._customSegmentPlayback && options.allowCustomPlayback !== true) {
         this._stopCustomSegmentPlayback("paused", this._customSegmentPlayback.currentTimeSec);
       }
@@ -2648,17 +2737,21 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     _updatePlayhead(currentTime, fromPlayback) {
       if (!this.audioBuffer) return;
       const duration = Math.max(1e-3, this.audioBuffer.duration);
-      const canvasWidth = this.d.spectrogramCanvas.width;
+      const canvasWidth = Math.max(1, this.d.spectrogramCanvas.width || this.d.amplitudeCanvas.width || 0);
       const position = currentTime / duration * canvasWidth;
       this.d.playhead.style.transform = `translateX(${position}px)`;
       this.d.waveformPlayhead.style.transform = `translateX(${position}px)`;
       if (fromPlayback && this.followPlayback && this.wavesurfer?.isPlaying()) {
         const vw = this._getViewportWidth();
-        const scrollLeft = this.d.canvasWrapper.scrollLeft;
-        const guardLeft = scrollLeft + vw * 0.35;
-        const guardRight = scrollLeft + vw * 0.65;
-        if (position < guardLeft || position > guardRight) {
-          this._setLinkedScrollLeft(Math.max(0, position - vw * 0.5));
+        if (this.followMode === "smooth") {
+          this._applySmoothFollow(position, vw);
+        } else {
+          const scrollLeft = this.d.canvasWrapper.scrollLeft;
+          const guardLeft = scrollLeft + vw * this._playbackViewportConfig.followGuardLeftRatio;
+          const guardRight = scrollLeft + vw * this._playbackViewportConfig.followGuardRightRatio;
+          if (position < guardLeft || position > guardRight) {
+            this._animateFollowCatchupTo(Math.max(0, position - vw * this._playbackViewportConfig.followTargetRatio));
+          }
         }
       }
       this._syncOverviewWindowToViewport();
@@ -2968,14 +3061,16 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       return this.spectrogramBaseCanvas;
     }
     _drawSpectrogram() {
+      if (!this._showSpectrogram) return;
       if (!this.audioBuffer || !this.spectrogramData || this.spectrogramFrames <= 0) return;
       if (!this.spectrogramBaseCanvas) this._buildSpectrogramBaseImage();
       if (!this.spectrogramBaseCanvas) return;
+      const effectiveSpectrogramHeight = this._getEffectiveSpectrogramHeight();
       renderSpectrogram({
         duration: this.audioBuffer.duration,
         spectrogramCanvas: this.d.spectrogramCanvas,
         pixelsPerSecond: this.pixelsPerSecond,
-        canvasHeight: this.spectrogramDisplayHeight,
+        canvasHeight: effectiveSpectrogramHeight,
         baseCanvas: this.spectrogramBaseCanvas,
         sampleRate: this.audioBuffer.sampleRate,
         frameRate: PERCH_FRAME_RATE,
@@ -2995,18 +3090,22 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     //  Waveform Rendering
     // ═════════════════════════════════════════════════════════════════
     _drawMainWaveform() {
+      if (!this._showWaveform) return;
+      const effectiveWaveformHeight = this._getEffectiveWaveformHeight();
       renderMainWaveform({
         audioBuffer: this.audioBuffer,
         amplitudeCanvas: this.d.amplitudeCanvas,
         waveformTimelineCanvas: this.d.waveformTimelineCanvas,
         waveformContent: this.d.waveformContent,
         pixelsPerSecond: this.pixelsPerSecond,
-        waveformHeight: this.waveformDisplayHeight,
-        amplitudePeakAbs: this.amplitudePeakAbs
+        waveformHeight: effectiveWaveformHeight,
+        amplitudePeakAbs: this.amplitudePeakAbs,
+        showTimeline: this._showWaveformTimeline
       });
       this._scheduleUiUpdate({ time: this._getCurrentTime(), fromPlayback: false, immediate: true });
     }
     _drawOverviewWaveform() {
+      if (!this._showOverview) return;
       renderOverviewWaveform({
         audioBuffer: this.audioBuffer,
         overviewCanvas: this.d.overviewCanvas,
@@ -3027,8 +3126,8 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       if (!el) return;
       el.innerHTML = "";
       const peak = Math.max(1e-6, this.amplitudePeakAbs || 1);
-      const clampedH = Math.max(MIN_WAVEFORM_HEIGHT, Math.floor(this.waveformDisplayHeight));
-      const timelineH = Math.max(18, Math.min(32, Math.round(clampedH * 0.22)));
+      const clampedH = this._getEffectiveWaveformHeight();
+      const timelineH = this._showWaveformTimeline ? Math.max(18, Math.min(32, Math.round(clampedH * 0.22))) : 0;
       const ampH = Math.max(32, clampedH - timelineH);
       const fmt = (v) => {
         const a = Math.abs(v);
@@ -3123,7 +3222,13 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     //  Overview Navigator
     // ═════════════════════════════════════════════════════════════════
     _syncOverviewWindowToViewport() {
-      if (!this.audioBuffer || this.d.spectrogramCanvas.width <= 0) return;
+      if (!this._showOverview || !this.audioBuffer) return;
+      const trackWidth = Math.max(
+        this.d.spectrogramCanvas.width || 0,
+        this.d.amplitudeCanvas.width || 0,
+        Math.floor(this.audioBuffer.duration * this.pixelsPerSecond)
+      );
+      if (trackWidth <= 0) return;
       const vw = this._getViewportWidth();
       const viewTime = vw / this.pixelsPerSecond;
       const startTime = this.d.canvasWrapper.scrollLeft / this.pixelsPerSecond;
@@ -3151,6 +3256,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       }
     }
     _updateOverviewWindowElement() {
+      if (!this._showOverview) return;
       const cw = this.d.overviewContainer.clientWidth;
       const left = this.windowStartNorm * cw;
       const width = Math.max(8, this.windowEndNorm * cw - left);
@@ -3164,7 +3270,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       this.overviewDragEnd = this.windowEndNorm;
     }
     _updateOverviewDrag(clientX) {
-      if (!this.audioBuffer || !this.overviewMode) return;
+      if (!this._showOverview || !this.audioBuffer || !this.overviewMode) return;
       const cw = this.d.overviewContainer.clientWidth;
       const deltaNorm = (clientX - this.overviewDragStartX) / cw;
       if (this.overviewMode === "move") {
@@ -3196,7 +3302,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       this._applyOverviewWindowToViewport();
     }
     _applyOverviewWindowToViewport() {
-      if (!this.audioBuffer) return;
+      if (!this._showOverview || !this.audioBuffer) return;
       const dur = this.audioBuffer.duration;
       const viewDur = Math.max(0.01, (this.windowEndNorm - this.windowStartNorm) * dur);
       const targetPps = this._getViewportWidth() / viewDur;
@@ -3212,7 +3318,8 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
         return;
       }
       if (!this.audioBuffer) return;
-      this._seekToTime(this._clientXToTime(e.clientX, "spectrogram"), false);
+      this._cancelFollowCatchupAnimation();
+      this._seekToTime(this._clientXToTime(e.clientX, "spectrogram"), false, { userInitiated: true });
     }
     _handleWaveformClick(e) {
       if (performance.now() < this._blockSeekClickUntil) return;
@@ -3221,7 +3328,8 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
         return;
       }
       if (!this.audioBuffer) return;
-      this._seekToTime(this._clientXToTime(e.clientX, "waveform"), false);
+      this._cancelFollowCatchupAnimation();
+      this._seekToTime(this._clientXToTime(e.clientX, "waveform"), false, { userInitiated: true });
     }
     _blockSeekClicks(ms = 220) {
       this._blockSeekClickUntil = Math.max(this._blockSeekClickUntil, performance.now() + ms);
@@ -3240,6 +3348,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     }
     _startViewportPan(event, source) {
       if (!this.audioBuffer) return;
+      this._cancelFollowCatchupAnimation();
       if (event.target === this.d.playhead || event.target === this.d.waveformPlayhead) return;
       if (event.button !== 0 && event.button !== 1) return;
       if (event.button === 1) event.preventDefault();
@@ -3259,6 +3368,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     // ═════════════════════════════════════════════════════════════════
     _handleWheel(event, source) {
       if (!this.audioBuffer) return;
+      this._cancelFollowCatchupAnimation();
       const wrapper = source === "waveform" ? this.d.waveformWrapper : this.d.canvasWrapper;
       const rect = wrapper.getBoundingClientRect();
       const localX = event.clientX - rect.left;
@@ -3278,8 +3388,36 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     //  View Resize
     // ═════════════════════════════════════════════════════════════════
     _applyLocalViewHeights() {
-      this.d.waveformContainer.style.height = `${Math.round(this.waveformDisplayHeight)}px`;
-      this.d.spectrogramContainer.style.height = `${Math.round(this.spectrogramDisplayHeight)}px`;
+      const overlaySingleWaveform = this._transportOverlay && this._showWaveform && !this._showSpectrogram;
+      const overlaySingleSpectrogram = this._transportOverlay && this._showSpectrogram && !this._showWaveform;
+      if (this._showWaveform) {
+        if (overlaySingleWaveform) {
+          this.d.waveformContainer.style.height = "auto";
+        } else {
+          this.d.waveformContainer.style.height = `${Math.round(this.waveformDisplayHeight)}px`;
+        }
+      }
+      if (this._showSpectrogram) {
+        if (overlaySingleSpectrogram) {
+          this.d.spectrogramContainer.style.height = "auto";
+        } else {
+          this.d.spectrogramContainer.style.height = `${Math.round(this.spectrogramDisplayHeight)}px`;
+        }
+      }
+    }
+    _getEffectiveWaveformHeight() {
+      if (this._transportOverlay && this._showWaveform && !this._showSpectrogram) {
+        const h = this.d.waveformContainer?.clientHeight || 0;
+        return Math.max(MIN_WAVEFORM_HEIGHT, Math.floor(h || this.waveformDisplayHeight));
+      }
+      return Math.max(MIN_WAVEFORM_HEIGHT, Math.floor(this.waveformDisplayHeight));
+    }
+    _getEffectiveSpectrogramHeight() {
+      if (this._transportOverlay && this._showSpectrogram && !this._showWaveform) {
+        const h = this.d.spectrogramContainer?.clientHeight || 0;
+        return Math.max(MIN_SPECTROGRAM_DISPLAY_HEIGHT, Math.floor(h || this.spectrogramDisplayHeight));
+      }
+      return Math.max(MIN_SPECTROGRAM_DISPLAY_HEIGHT, Math.floor(this.spectrogramDisplayHeight));
     }
     _startViewResize(mode, clientY) {
       this.viewResizeMode = mode;
@@ -3290,6 +3428,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     }
     _updateViewResize(clientY) {
       if (!this.viewResizeMode) return;
+      if (this.viewResizeMode === "split" && (!this._showWaveform || !this._showSpectrogram) || this.viewResizeMode === "spectrogram" && !this._showSpectrogram) return;
       const dy = clientY - this.viewResizeStartY;
       let redrawWav = false;
       if (this.viewResizeMode === "split") {
@@ -3369,10 +3508,77 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       });
     }
     _updateToggleButtons() {
-      this.d.followToggleBtn.classList.toggle("active", this.followPlayback);
-      this.d.loopToggleBtn.classList.toggle("active", this.loopPlayback);
-      this.d.followToggleBtn.textContent = this.followPlayback ? "Follow" : "Free";
-      this.d.loopToggleBtn.textContent = this.loopPlayback ? "Loop On" : "Loop";
+      this.followPlayback = this.followMode !== "free";
+      if (this.d.followToggleBtn) {
+        this.d.followToggleBtn.classList.toggle("active", this.followPlayback);
+        this.d.followToggleBtn.textContent = this.followMode === "smooth" ? "Smooth" : this.followPlayback ? "Follow" : "Free";
+        this.d.followToggleBtn.title = this.followMode === "smooth" ? "Smooth follow (continuous)" : this.followPlayback ? "Follow playhead" : "Free navigation";
+      }
+      if (this.d.loopToggleBtn) {
+        this.d.loopToggleBtn.classList.toggle("active", this.loopPlayback);
+        this.d.loopToggleBtn.textContent = this.loopPlayback ? "Loop On" : "Loop";
+      }
+    }
+    _cycleFollowMode() {
+      this.followMode = this.followMode === "free" ? "follow" : this.followMode === "follow" ? "smooth" : "free";
+      if (this.followMode !== "follow") this._cancelFollowCatchupAnimation();
+      this._updateToggleButtons();
+      this._emit("followmodechange", { mode: this.followMode });
+    }
+    _cancelFollowCatchupAnimation() {
+      if (this._followCatchupRafId) {
+        cancelAnimationFrame(this._followCatchupRafId);
+        this._followCatchupRafId = 0;
+      }
+      this._followCatchupAnim = null;
+    }
+    _animateFollowCatchupTo(targetScrollLeft) {
+      if (!this.audioBuffer) return;
+      const vw = this._getViewportWidth();
+      const tw = Math.max(1, Math.floor(this.audioBuffer.duration * this.pixelsPerSecond));
+      const maxScroll = Math.max(0, tw - vw);
+      const target = Math.max(0, Math.min(maxScroll, targetScrollLeft));
+      const start = this.d.canvasWrapper.scrollLeft;
+      const delta = target - start;
+      if (Math.abs(delta) < 1) return;
+      const now = performance.now();
+      const inSeekFocus = now < this._smoothSeekFocusUntil;
+      const duration = inSeekFocus ? this._playbackViewportConfig.followCatchupSeekDurationMs : this._playbackViewportConfig.followCatchupDurationMs;
+      if (this._followCatchupAnim) {
+        const pending = this._followCatchupAnim.target;
+        if (Math.abs(pending - target) < 6) return;
+      }
+      this._cancelFollowCatchupAnimation();
+      this._followCatchupAnim = { start, target, startedAt: now, duration };
+      const easeOutCubic = (t) => 1 - (1 - t) ** 3;
+      const tick = (ts) => {
+        const anim = this._followCatchupAnim;
+        if (!anim) return;
+        const t = Math.max(0, Math.min(1, (ts - anim.startedAt) / Math.max(1, anim.duration)));
+        const eased = easeOutCubic(t);
+        const next = anim.start + (anim.target - anim.start) * eased;
+        this._setLinkedScrollLeft(next);
+        if (t >= 1) {
+          this._cancelFollowCatchupAnimation();
+          return;
+        }
+        this._followCatchupRafId = requestAnimationFrame(tick);
+      };
+      this._followCatchupRafId = requestAnimationFrame(tick);
+    }
+    _applySmoothFollow(position, viewportWidth) {
+      const vw = Math.max(1, viewportWidth || this._getViewportWidth());
+      const totalWidth = this.audioBuffer ? Math.max(1, Math.floor(this.audioBuffer.duration * this.pixelsPerSecond)) : 0;
+      const maxScroll = Math.max(0, totalWidth - vw);
+      const target = Math.max(0, Math.min(maxScroll, position - vw * this._playbackViewportConfig.followTargetRatio));
+      const current = this.d.canvasWrapper.scrollLeft;
+      const delta = target - current;
+      if (Math.abs(delta) < 0.6) return;
+      const inSeekFocus = performance.now() < this._smoothSeekFocusUntil;
+      const lerp = inSeekFocus ? this._playbackViewportConfig.smoothSeekLerp : this._playbackViewportConfig.smoothLerp;
+      const minStep = inSeekFocus ? vw * this._playbackViewportConfig.smoothSeekMinStepRatio : vw * this._playbackViewportConfig.smoothMinStepRatio;
+      const step = Math.sign(delta) * Math.min(Math.abs(delta), Math.max(minStep, Math.abs(delta) * lerp, 1));
+      this._setLinkedScrollLeft(current + step);
     }
     _setInitialPlayheadPositions() {
       this.d.playhead.style.left = "0px";
@@ -3432,10 +3638,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       on(this.d.jumpEndBtn, "click", () => this._seekToTime(this.audioBuffer?.duration ?? 0, true));
       on(this.d.backwardBtn, "click", () => this._seekByDelta(-SEEK_COARSE_SEC));
       on(this.d.forwardBtn, "click", () => this._seekByDelta(SEEK_COARSE_SEC));
-      on(this.d.followToggleBtn, "click", () => {
-        this.followPlayback = !this.followPlayback;
-        this._updateToggleButtons();
-      });
+      on(this.d.followToggleBtn, "click", () => this._cycleFollowMode());
       on(this.d.loopToggleBtn, "click", () => {
         this.loopPlayback = !this.loopPlayback;
         this._updateToggleButtons();
@@ -3522,10 +3725,12 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       on(this.d.playhead, "pointerdown", (e) => this._startPlayheadDrag(e, "spectrogram"));
       on(this.d.waveformPlayhead, "pointerdown", (e) => this._startPlayheadDrag(e, "waveform"));
       on(this.d.viewSplitHandle, "pointerdown", (e) => {
+        if (!this._showWaveform || !this._showSpectrogram) return;
         e.preventDefault();
         this._startViewResize("split", e.clientY);
       });
       on(this.d.spectrogramResizeHandle, "pointerdown", (e) => {
+        if (!this._showSpectrogram) return;
         e.preventDefault();
         this._startViewResize("spectrogram", e.clientY);
       });
@@ -3552,19 +3757,23 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       on(document, "pointercancel", releaseAll);
       on(document, "keydown", (e) => this._handleKeyboardShortcuts(e));
       on(this.d.overviewHandleLeft, "pointerdown", (e) => {
+        if (!this._showOverview) return;
         e.preventDefault();
         this._startOverviewDrag("left", e.clientX);
       });
       on(this.d.overviewHandleRight, "pointerdown", (e) => {
+        if (!this._showOverview) return;
         e.preventDefault();
         this._startOverviewDrag("right", e.clientX);
       });
       on(this.d.overviewWindow, "pointerdown", (e) => {
+        if (!this._showOverview) return;
         if (e.target === this.d.overviewHandleLeft || e.target === this.d.overviewHandleRight) return;
         e.preventDefault();
         this._startOverviewDrag("move", e.clientX);
       });
       on(this.d.overviewCanvas, "click", (e) => {
+        if (!this._showOverview) return;
         if (!this.audioBuffer) return;
         const rect = this.d.overviewCanvas.getBoundingClientRect();
         const xNorm = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
@@ -3614,6 +3823,156 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
   // src/annotations.js
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
+  }
+  var _colorCtx = (() => {
+    try {
+      const canvas = document.createElement("canvas");
+      return canvas.getContext("2d");
+    } catch {
+      return null;
+    }
+  })();
+  function _parseColorToRgb(color) {
+    const raw = String(color || "").trim();
+    if (!raw || !_colorCtx) return null;
+    try {
+      _colorCtx.fillStyle = "#000000";
+      _colorCtx.fillStyle = raw;
+      const normalized = _colorCtx.fillStyle;
+      if (!normalized) return null;
+      if (normalized.startsWith("#")) {
+        const hex = normalized.slice(1);
+        if (hex.length === 3) {
+          return {
+            r: parseInt(hex[0] + hex[0], 16),
+            g: parseInt(hex[1] + hex[1], 16),
+            b: parseInt(hex[2] + hex[2], 16)
+          };
+        }
+        if (hex.length === 6) {
+          return {
+            r: parseInt(hex.slice(0, 2), 16),
+            g: parseInt(hex.slice(2, 4), 16),
+            b: parseInt(hex.slice(4, 6), 16)
+          };
+        }
+      }
+      const m = normalized.match(/rgba?\(([^)]+)\)/i);
+      if (!m) return null;
+      const parts = m[1].split(",").map((x) => Number(x.trim()));
+      if (parts.length < 3 || parts.some((n, i) => i < 3 && !Number.isFinite(n))) return null;
+      return { r: parts[0], g: parts[1], b: parts[2] };
+    } catch {
+      return null;
+    }
+  }
+  function _rgbToHex({ r, g, b }) {
+    const toHex = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  }
+  function getOverlayColorStyle(color) {
+    const rgb = _parseColorToRgb(color);
+    if (!rgb) return null;
+    return {
+      fill: `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.22)`,
+      edge: `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.95)`,
+      soft: `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.55)`,
+      hex: _rgbToHex(rgb)
+    };
+  }
+  function openLabelNameEditor({ player, anchorEl, initialValue, initialColor, onSubmit }) {
+    const host = player?.root || player?.container || document.body;
+    if (!host || !anchorEl || typeof onSubmit !== "function") return;
+    const panel = document.createElement("div");
+    panel.className = "label-name-editor";
+    panel.innerHTML = `
+        <input class="label-name-input" type="text" maxlength="96" />
+        <div class="label-name-color">
+            <span>Color</span>
+            <input class="label-color-input" type="color" />
+        </div>
+        <div class="label-name-suggestions"></div>
+        <div class="label-name-actions">
+            <button type="button" class="label-name-btn cancel">Cancel</button>
+            <button type="button" class="label-name-btn save">Save</button>
+        </div>
+    `;
+    host.appendChild(panel);
+    const input = panel.querySelector(".label-name-input");
+    const colorInput = panel.querySelector(".label-color-input");
+    const sugg = panel.querySelector(".label-name-suggestions");
+    const saveBtn = panel.querySelector(".label-name-btn.save");
+    const cancelBtn = panel.querySelector(".label-name-btn.cancel");
+    input.value = String(initialValue || "").trim();
+    const initialStyle = getOverlayColorStyle(initialColor);
+    colorInput.value = initialStyle?.hex || "#0ea5e9";
+    const anchorRect = anchorEl.getBoundingClientRect();
+    const hostRect = host.getBoundingClientRect();
+    panel.style.left = `${Math.max(4, anchorRect.left - hostRect.left)}px`;
+    panel.style.top = `${Math.max(4, anchorRect.bottom - hostRect.top + 6)}px`;
+    const close = () => {
+      if (panel.parentNode) panel.parentNode.removeChild(panel);
+    };
+    const submit = (value) => {
+      const trimmed = String(value || "").trim();
+      if (!trimmed) return;
+      onSubmit({ name: trimmed, color: colorInput.value });
+      close();
+    };
+    const renderSuggestions = () => {
+      const taxonomy = player?.getLabelTaxonomy?.() || [];
+      const recent = player?.getLabelSuggestions?.("", 8) || [];
+      const filtered = player?.getLabelSuggestions?.(input.value, 8) || [];
+      const names = [];
+      const seen = /* @__PURE__ */ new Set();
+      for (const name of recent) {
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        names.push(name);
+      }
+      for (const name of filtered) {
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        names.push(name);
+      }
+      sugg.innerHTML = "";
+      for (const item of taxonomy) {
+        if (!item?.name) continue;
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "label-name-chip taxonomy";
+        chip.textContent = item.shortcut ? `${item.shortcut}: ${item.name}` : item.name;
+        if (item.color) chip.style.setProperty("--chip-color", item.color);
+        chip.addEventListener("click", () => {
+          if (item.color) colorInput.value = getOverlayColorStyle(item.color)?.hex || colorInput.value;
+          submit(item.name);
+        });
+        sugg.appendChild(chip);
+      }
+      for (const name of names) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "label-name-chip";
+        chip.textContent = name;
+        chip.addEventListener("click", () => submit(name));
+        sugg.appendChild(chip);
+      }
+    };
+    input.addEventListener("input", renderSuggestions);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit(input.value);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+    });
+    saveBtn.addEventListener("click", () => submit(input.value));
+    cancelBtn.addEventListener("click", close);
+    setTimeout(() => input.focus(), 0);
+    input.select();
+    renderSuggestions();
   }
   var AnnotationLayer = class {
     constructor() {
@@ -3708,7 +4067,12 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       el.setAttribute("tabindex", "0");
       el.style.left = `${Math.max(0, region.start * pixelsPerSecond)}px`;
       el.style.width = `${Math.max(1, (region.end - region.start) * pixelsPerSecond)}px`;
-      if (region.color) el.style.setProperty("--annotation-color", region.color);
+      const colorStyle = getOverlayColorStyle(region.color);
+      if (colorStyle) {
+        el.style.setProperty("--annotation-color-fill", colorStyle.fill);
+        el.style.setProperty("--annotation-color-edge", colorStyle.edge);
+        el.style.setProperty("--annotation-color-soft", colorStyle.soft);
+      }
       el.dataset.id = region.id;
       el.dataset.start = String(region.start);
       el.dataset.end = String(region.end);
@@ -3723,11 +4087,19 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
         if (performance.now() < this._suppressClickUntil) return;
         event.preventDefault();
         event.stopPropagation();
+        this.player?._emit?.("labelfocus", { id: region.id, source: "waveform" });
         this.player?._state?._blockSeekClicks?.(260);
         this.player?.playSegment?.(region.start, region.end, { labelId: region.id });
       });
+      el.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this._suppressClickUntil = performance.now() + 250;
+        this._renameRegionPrompt(region.id);
+      });
       el.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
+        this.player?._emit?.("labelfocus", { id: region.id, source: "waveform" });
         const handle = event.target?.closest?.(".annotation-handle");
         const mode = handle?.dataset?.mode || "move";
         this._startEditInteraction(region.id, mode, event.clientX, el);
@@ -3818,6 +4190,26 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
         this.render();
       }
     }
+    _renameRegionPrompt(id) {
+      const region = this.annotations.find((a) => a.id === id);
+      if (!region) return;
+      const current = region.species || "Annotation";
+      const el = this.overlay?.querySelector?.(`.annotation-region[data-id="${region.id}"]`);
+      openLabelNameEditor({
+        player: this.player,
+        anchorEl: el || this.overlay,
+        initialValue: current,
+        initialColor: region.color,
+        onSubmit: ({ name, color }) => {
+          const currentHex = getOverlayColorStyle(region.color)?.hex || "";
+          if (name === current && color === currentHex) return;
+          region.species = name;
+          region.color = color;
+          this.player?._emit?.("annotationupdate", { annotation: { ...region } });
+          this.render();
+        }
+      });
+    }
     _normalize(annotation) {
       const start = Number(annotation?.start ?? 0);
       const end = Number(annotation?.end ?? start);
@@ -3832,7 +4224,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
         end: Math.max(s + 0.01, e),
         species: annotation?.species || "",
         confidence: annotation?.confidence,
-        color: annotation?.color || ""
+        color: String(annotation?.color || "").trim()
       };
     }
   };
@@ -3932,7 +4324,12 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       el.setAttribute("role", "button");
       el.setAttribute("tabindex", "0");
       this._applyGeometryToElement(el, this._toGeometry(label, canvasWidth, canvasHeight));
-      if (label.color) el.style.setProperty("--spectrogram-label-color", label.color);
+      const colorStyle = getOverlayColorStyle(label.color);
+      if (colorStyle) {
+        el.style.setProperty("--spectrogram-label-color", colorStyle.fill);
+        el.style.setProperty("--spectrogram-label-edge", colorStyle.edge);
+        el.style.setProperty("--spectrogram-label-soft", colorStyle.soft);
+      }
       el.dataset.id = label.id;
       el.dataset.start = String(label.start);
       el.dataset.end = String(label.end);
@@ -3953,6 +4350,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
         if (performance.now() < this._suppressClickUntil) return;
         event.stopPropagation();
         event.preventDefault();
+        this.player?._emit?.("labelfocus", { id: label.id, source: "spectrogram" });
         this.player?._state?._blockSeekClicks?.(260);
         this.player?.playBandpassedSegment?.(
           label.start,
@@ -3962,8 +4360,15 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
           { labelId: label.id }
         );
       });
+      el.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this._suppressClickUntil = performance.now() + 250;
+        this._renameSpectrogramLabelPrompt(label.id);
+      });
       el.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
+        this.player?._emit?.("labelfocus", { id: label.id, source: "spectrogram" });
         const handle = event.target?.closest?.(".label-handle");
         const mode = handle?.dataset?.mode || "move";
         this._startEditInteraction(label.id, mode, event.clientX, event.clientY, el);
@@ -4201,6 +4606,26 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
         this.render();
       }
     }
+    _renameSpectrogramLabelPrompt(id) {
+      const label = this.labels.find((l) => l.id === id);
+      if (!label) return;
+      const current = label.label || "Label";
+      const el = this.overlay?.querySelector?.(`.spectrogram-label-region[data-id="${label.id}"]`);
+      openLabelNameEditor({
+        player: this.player,
+        anchorEl: el || this.overlay,
+        initialValue: current,
+        initialColor: label.color,
+        onSubmit: ({ name, color }) => {
+          const currentHex = getOverlayColorStyle(label.color)?.hex || "";
+          if (name === current && color === currentHex) return;
+          label.label = name;
+          label.color = color;
+          this.player?._emit?.("spectrogramlabelupdate", { label: { ...label } });
+          this.render();
+        }
+      });
+    }
     _clientXToTime(clientX) {
       return this.player?._state?._clientXToTime?.(clientX, "spectrogram") || 0;
     }
@@ -4241,13 +4666,19 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
         freqMin: f0,
         freqMax: Math.max(f0 + 1, f1),
         label: label?.label || "",
-        color: label?.color || ""
+        color: String(label?.color || "").trim()
       };
     }
   };
 
   // src/BirdNETPlayer.js
   var WAVESURFER_CDN = "https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.esm.js";
+  var DEFAULT_LABEL_TAXONOMY = [
+    { name: "Bird Call", color: "#0ea5e9", shortcut: "1" },
+    { name: "Song", color: "#22c55e", shortcut: "2" },
+    { name: "Chirp", color: "#f59e0b", shortcut: "3" },
+    { name: "Noise", color: "#ef4444", shortcut: "4" }
+  ];
   var BirdNETPlayer = class {
     /**
      * @param {HTMLElement} container — the DOM element to mount the player into
@@ -4262,6 +4693,21 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
      * @param {boolean}     [options.showFFTControls] — show FFT/Freq/Color selects (default: true)
      * @param {boolean}     [options.showDisplayGain] — show Floor/Ceil sliders (default: true)
      * @param {boolean}     [options.showStatusbar]   — show bottom status bar (default: true)
+     * @param {boolean}     [options.showOverview]    — show overview navigator (default: true)
+     * @param {'both'|'waveform'|'spectrogram'} [options.viewMode] — visible analysis view(s) (default: both)
+     * @param {'default'|'hero'} [options.transportStyle] — transport button style (default: default)
+     * @param {boolean}     [options.transportOverlay] — centered play overlay without toolbar height (default: false)
+     * @param {boolean}     [options.showWaveformTimeline] — show bottom waveform timeline (default: true)
+     * @param {number}      [options.followGuardLeftRatio] — left follow guard ratio (default: 0.35)
+     * @param {number}      [options.followGuardRightRatio] — right follow guard ratio (default: 0.65)
+     * @param {number}      [options.followTargetRatio] — target ratio for viewport centering (default: 0.5)
+     * @param {number}      [options.followCatchupDurationMs] — follow catchup tween duration (default: 240)
+     * @param {number}      [options.followCatchupSeekDurationMs] — slower follow tween after manual seek (default: 360)
+     * @param {number}      [options.smoothLerp] — smooth mode lerp factor (default: 0.18)
+     * @param {number}      [options.smoothSeekLerp] — smooth mode lerp after manual seek (default: 0.08)
+     * @param {number}      [options.smoothMinStepRatio] — smooth min step ratio (default: 0.03)
+     * @param {number}      [options.smoothSeekMinStepRatio] — smooth min step ratio after seek (default: 0.008)
+     * @param {number}      [options.smoothSeekFocusMs] — slow-follow window after manual seek (default: 1400)
      */
     constructor(container, options = {}) {
       if (!container) throw new Error("BirdNETPlayer: container element required");
@@ -4273,6 +4719,10 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       this.spectrogramLabels = new SpectrogramLabelLayer();
       this._linkedLabels = /* @__PURE__ */ new Map();
       this._isSyncingLabels = false;
+      this._labelLibrary = /* @__PURE__ */ new Map();
+      this._labelTaxonomy = this._normalizeTaxonomy(options.labelTaxonomy || DEFAULT_LABEL_TAXONOMY);
+      this._activeLabelId = null;
+      this._globalKeyHandler = null;
       this.on = (event, callback, options2) => {
         this._events.addEventListener(event, callback, options2);
         return () => this.off(event, callback, options2);
@@ -4299,6 +4749,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       this.annotations.attach(this);
       this.spectrogramLabels.attach(this);
       this._bindLinkedLabelSync();
+      this._bindGlobalHotkeys();
       this._emit("ready", { phase: "init" });
       return this;
     }
@@ -4411,8 +4862,65 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       this._linkedLabels.clear();
       this._syncLinkedLabelsToLayers();
     }
+    renameLabel(id, name) {
+      const key = String(id || "").trim();
+      const value = String(name || "").trim();
+      if (!key || !value) return false;
+      const current = this._linkedLabels.get(key);
+      if (!current) return false;
+      this._linkedLabels.set(key, this._normalizeLinkedLabel({
+        ...current,
+        id: key,
+        label: value,
+        species: value
+      }));
+      this._syncLinkedLabelsToLayers();
+      return true;
+    }
+    getLabelSuggestions(prefix = "", limit = 10) {
+      const q = String(prefix || "").trim().toLowerCase();
+      const ranked = Array.from(this._labelLibrary.entries()).filter(([name]) => !q || name.toLowerCase().includes(q)).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, Math.max(1, limit)).map(([name]) => name);
+      return ranked;
+    }
+    getLabelTaxonomy() {
+      return this._labelTaxonomy.map((item) => ({ ...item }));
+    }
+    setLabelTaxonomy(taxonomy = []) {
+      this._labelTaxonomy = this._normalizeTaxonomy(taxonomy);
+      this._syncLinkedLabelsToLayers();
+    }
+    applyTaxonomyToLabel(id, shortcutOrIndex) {
+      const key = String(id || "").trim();
+      const current = this._linkedLabels.get(key);
+      if (!current) return false;
+      const index = typeof shortcutOrIndex === "number" ? shortcutOrIndex : this._labelTaxonomy.findIndex((t) => t.shortcut === String(shortcutOrIndex));
+      if (index < 0 || index >= this._labelTaxonomy.length) return false;
+      const tax = this._labelTaxonomy[index];
+      const next = this._normalizeLinkedLabel({
+        ...current,
+        id: key,
+        label: tax.name,
+        species: tax.name,
+        color: tax.color || current.color
+      });
+      this._linkedLabels.set(key, next);
+      this._activeLabelId = key;
+      this._syncLinkedLabelsToLayers();
+      this._emit("labeltaxonomyapply", { id: key, taxonomy: { ...tax } });
+      return true;
+    }
+    setPlaybackViewportConfig(config = {}) {
+      return this._state?.updatePlaybackViewportConfig?.(config) || null;
+    }
+    getPlaybackViewportConfig() {
+      return this._state?.getPlaybackViewportConfig?.() || null;
+    }
     /** Tear down the player and free resources */
     destroy() {
+      if (this._globalKeyHandler) {
+        document.removeEventListener("keydown", this._globalKeyHandler, true);
+        this._globalKeyHandler = null;
+      }
       this.annotations.detach();
       this.spectrogramLabels.detach();
       this._state?.dispose();
@@ -4420,12 +4928,31 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       this.container.innerHTML = "";
     }
     _bindLinkedLabelSync() {
+      this.on("labelfocus", (e) => {
+        const id = String(e?.detail?.id || "").trim();
+        this._activeLabelId = id || null;
+      });
       this.on("annotationpreview", (e) => this._previewFromAnnotationEvent(e.detail.annotation));
       this.on("spectrogramlabelpreview", (e) => this._previewFromSpectrogramEvent(e.detail.label));
       this.on("annotationcreate", (e) => this._upsertFromAnnotationEvent(e.detail.annotation));
       this.on("annotationupdate", (e) => this._upsertFromAnnotationEvent(e.detail.annotation));
       this.on("spectrogramlabelcreate", (e) => this._upsertFromSpectrogramEvent(e.detail.label));
       this.on("spectrogramlabelupdate", (e) => this._upsertFromSpectrogramEvent(e.detail.label));
+    }
+    _bindGlobalHotkeys() {
+      this._globalKeyHandler = (event) => {
+        if (!this._activeLabelId) return;
+        const tag = event?.target?.tagName?.toLowerCase?.() || "";
+        const typing = tag === "input" || tag === "textarea" || event?.target?.isContentEditable;
+        if (typing) return;
+        const key = String(event.key || "");
+        if (!/^[1-9]$/.test(key)) return;
+        const idx = Number(key) - 1;
+        if (idx >= this._labelTaxonomy.length) return;
+        event.preventDefault();
+        this.applyTaxonomyToLabel(this._activeLabelId, idx);
+      };
+      document.addEventListener("keydown", this._globalKeyHandler, true);
     }
     _previewFromAnnotationEvent(annotation) {
       if (this._isSyncingLabels || !annotation) return;
@@ -4496,9 +5023,37 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       try {
         this.annotations.set(this._toAnnotationList());
         this.spectrogramLabels.set(this._toSpectrogramLabelList());
+        this._rebuildLabelLibrary();
       } finally {
         this._isSyncingLabels = false;
       }
+    }
+    _rebuildLabelLibrary() {
+      const next = /* @__PURE__ */ new Map();
+      for (const item of this._linkedLabels.values()) {
+        const label = String(item?.label || item?.species || "").trim();
+        if (!label) continue;
+        next.set(label, (next.get(label) || 0) + 1);
+      }
+      this._labelLibrary = next;
+    }
+    _normalizeTaxonomy(taxonomy) {
+      const used = /* @__PURE__ */ new Set();
+      const list = [];
+      for (const item of taxonomy || []) {
+        const name = String(item?.name || "").trim();
+        if (!name) continue;
+        const shortcut = String(item?.shortcut || "").trim();
+        const normalizedShortcut = /^[1-9]$/.test(shortcut) && !used.has(shortcut) ? shortcut : "";
+        if (normalizedShortcut) used.add(normalizedShortcut);
+        list.push({
+          name,
+          color: item?.color ? String(item.color) : "",
+          shortcut: normalizedShortcut
+        });
+        if (list.length >= 9) break;
+      }
+      return list;
     }
     _toAnnotationList() {
       return Array.from(this._linkedLabels.values()).map((l) => ({
@@ -4532,6 +5087,8 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       const freqMaxRaw = Number(label?.freqMax ?? maxFreq);
       const freqMin = Math.max(0, Math.min(freqMinRaw, maxFreq));
       const freqMax = Math.max(freqMin + 1, Math.min(maxFreq, freqMaxRaw));
+      const labelName = String(label?.label || label?.species || "").trim();
+      const tax = labelName ? this._labelTaxonomy.find((t) => t.name.toLowerCase() === labelName.toLowerCase()) : null;
       return {
         id: label?.id || `lbl_${Math.random().toString(36).slice(2, 10)}`,
         start,
@@ -4541,7 +5098,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
         species: label?.species || "",
         label: label?.label || label?.species || "",
         confidence: label?.confidence,
-        color: label?.color || ""
+        color: label?.color || tax?.color || ""
       };
     }
   };

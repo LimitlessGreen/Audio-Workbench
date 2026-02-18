@@ -55,6 +55,17 @@ body {
     display: flex;
     flex-direction: column;
     height: 100%;
+    position: relative;
+}
+
+.daw-shell.view-mode-waveform .spectrogram-container,
+.daw-shell.view-mode-waveform .view-split-handle {
+    display: none;
+}
+
+.daw-shell.view-mode-spectrogram .waveform-container,
+.daw-shell.view-mode-spectrogram .view-split-handle {
+    display: none;
 }
 
 /* ═══ Top Toolbar ═══ */
@@ -249,6 +260,105 @@ body {
     opacity: 0.4;
 }
 
+.daw-shell.transport-style-hero .transport-btn:not(.play-btn) {
+    display: none;
+}
+
+.daw-shell.transport-style-hero .transport {
+    gap: 0;
+}
+
+.daw-shell.transport-style-hero .transport-btn.play-btn {
+    width: 56px;
+    height: 56px;
+    border-radius: 999px;
+    box-shadow: 0 10px 24px rgba(14, 165, 233, 0.35);
+}
+
+.daw-shell.transport-style-hero .toolbar {
+    min-height: 64px;
+    height: auto;
+    padding-top: 6px;
+    padding-bottom: 6px;
+}
+
+.daw-shell.transport-overlay .toolbar {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    pointer-events: none;
+    background: transparent;
+    border: 0;
+    height: auto;
+    min-height: 0;
+    padding: 0;
+    overflow: visible;
+}
+
+.daw-shell.transport-overlay .toolbar > :not(.transport) {
+    display: none !important;
+}
+
+.daw-shell.transport-overlay .views-panel {
+    position: relative;
+}
+
+.daw-shell.transport-overlay .view-split-handle,
+.daw-shell.transport-overlay .spectrogram-resize-handle {
+    display: none !important;
+}
+
+.daw-shell.transport-overlay .waveform-container,
+.daw-shell.transport-overlay .spectrogram-container {
+    flex: 1 1 auto;
+    height: auto !important;
+    min-height: 0;
+}
+
+.daw-shell.transport-overlay .canvas-wrapper,
+.daw-shell.transport-overlay .waveform-wrapper {
+    scrollbar-width: none;
+}
+
+.daw-shell.transport-overlay .canvas-wrapper::-webkit-scrollbar,
+.daw-shell.transport-overlay .waveform-wrapper::-webkit-scrollbar {
+    display: none;
+}
+
+.daw-shell.transport-overlay .transport {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: auto;
+    z-index: 32;
+}
+
+.daw-shell.transport-overlay .transport-btn:not(.play-btn) {
+    display: none;
+}
+
+.daw-shell.transport-overlay .transport-btn.play-btn {
+    width: 72px;
+    height: 72px;
+    border-radius: 999px;
+    border: 2px solid rgba(255, 255, 255, 0.95);
+    background: rgba(14, 165, 233, 0.82);
+    backdrop-filter: blur(2px);
+    box-shadow:
+        0 10px 26px rgba(14, 165, 233, 0.35),
+        0 0 0 2px rgba(2, 6, 23, 0.42);
+}
+
+.daw-shell.transport-overlay .transport-btn.play-btn:hover:not(:disabled) {
+    background: rgba(2, 132, 199, 0.9);
+}
+
+.daw-shell.transport-overlay .transport-btn.play-btn.playing {
+    opacity: 0;
+    transform: scale(0.88);
+}
+
 .transport-btn.play-btn.playing .icon-play {
     /* Swap to pause icon via CSS */
     display: none;
@@ -415,15 +525,17 @@ body {
 }
 
 .annotation-region {
-    --annotation-color: rgba(56, 189, 248, 0.22);
+    --annotation-color-fill: rgba(56, 189, 248, 0.18);
+    --annotation-color-edge: rgba(56, 189, 248, 0.9);
+    --annotation-color-soft: rgba(56, 189, 248, 0.45);
     appearance: none;
     -webkit-appearance: none;
     -moz-appearance: none;
     position: absolute;
     top: 0;
     bottom: 0;
-    border: 1px solid rgba(56, 189, 248, 0.7);
-    background: var(--annotation-color);
+    border: 1px solid var(--annotation-color-edge);
+    background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(0,0,0,0.04)), var(--annotation-color-fill);
     color: var(--color-text-primary);
     border-radius: 2px;
     display: flex;
@@ -450,13 +562,13 @@ body {
 }
 
 .annotation-region.linked-live {
-    outline: 2px solid rgba(56, 189, 248, 0.98);
+    outline: 2px solid var(--annotation-color-edge);
     outline-offset: -2px;
     box-shadow:
         0 0 0 1px rgba(2, 6, 23, 0.85),
-        0 0 12px rgba(56, 189, 248, 0.65),
+        0 0 12px var(--annotation-color-soft),
         inset 0 0 0 1px rgba(255,255,255,0.75);
-    background: rgba(14, 165, 233, 0.22);
+    background: var(--annotation-color-fill);
     animation: linkedPulse 0.9s ease-in-out infinite;
 }
 
@@ -506,12 +618,14 @@ body {
 }
 
 .spectrogram-label-region {
-    --spectrogram-label-color: rgba(15, 118, 110, 0.16);
+    --spectrogram-label-color: rgba(15, 118, 110, 0.18);
+    --spectrogram-label-edge: rgba(255, 255, 255, 0.98);
+    --spectrogram-label-soft: rgba(15, 118, 110, 0.58);
     appearance: none;
     -webkit-appearance: none;
     -moz-appearance: none;
     position: absolute;
-    border: 2px solid rgba(255, 255, 255, 0.98);
+    border: 2px solid var(--spectrogram-label-edge);
     outline: 1px solid rgba(0, 0, 0, 0.95);
     outline-offset: -3px;
     border-radius: 3px;
@@ -581,14 +695,14 @@ body {
 }
 
 .spectrogram-label-region.linked-live {
-    border-color: #67e8f9;
+    border-color: var(--spectrogram-label-edge);
     outline: 2px solid rgba(8, 47, 73, 0.98);
     outline-offset: -3px;
     box-shadow:
         inset 0 0 0 2px rgba(255,255,255,0.95),
-        inset 0 0 0 4px rgba(6,182,212,0.55),
-        0 0 0 2px rgba(103, 232, 249, 0.65),
-        0 0 18px rgba(6, 182, 212, 0.62);
+        inset 0 0 0 4px var(--spectrogram-label-soft),
+        0 0 0 2px var(--spectrogram-label-soft),
+        0 0 18px var(--spectrogram-label-soft);
     animation: linkedPulse 0.9s ease-in-out infinite;
 }
 
@@ -965,4 +1079,102 @@ body {
     letter-spacing: 0.08em;
     margin-bottom: 4px;
     color: #38bdf8;
+}
+
+.label-name-editor {
+    position: absolute;
+    z-index: 40;
+    min-width: 220px;
+    max-width: 320px;
+    padding: 8px;
+    border-radius: 8px;
+    border: 1px solid rgba(148, 163, 184, 0.45);
+    background: rgba(2, 6, 23, 0.96);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+}
+
+.label-name-input {
+    width: 100%;
+    border: 1px solid rgba(148, 163, 184, 0.55);
+    background: rgba(15, 23, 42, 0.95);
+    color: #f8fafc;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 12px;
+    outline: none;
+}
+
+.label-name-input:focus {
+    border-color: rgba(56, 189, 248, 0.95);
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.28);
+}
+
+.label-name-color {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 8px;
+    color: #cbd5e1;
+    font-size: 11px;
+}
+
+.label-color-input {
+    width: 34px;
+    height: 24px;
+    border: 1px solid rgba(148, 163, 184, 0.55);
+    border-radius: 6px;
+    background: rgba(15, 23, 42, 0.95);
+    padding: 0;
+    cursor: pointer;
+}
+
+.label-name-suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+    max-height: 96px;
+    overflow: auto;
+}
+
+.label-name-chip {
+    border: 1px solid rgba(148, 163, 184, 0.48);
+    background: rgba(30, 41, 59, 0.9);
+    color: #e2e8f0;
+    border-radius: 999px;
+    padding: 3px 8px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.label-name-chip:hover {
+    border-color: rgba(56, 189, 248, 0.9);
+    color: #bae6fd;
+}
+
+.label-name-chip.taxonomy {
+    border-color: var(--chip-color, #38bdf8);
+    box-shadow: inset 0 0 0 1px rgba(2, 6, 23, 0.55);
+}
+
+.label-name-actions {
+    margin-top: 8px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.label-name-btn {
+    border: 1px solid rgba(148, 163, 184, 0.5);
+    background: rgba(15, 23, 42, 0.92);
+    color: #e2e8f0;
+    border-radius: 6px;
+    font-size: 11px;
+    padding: 4px 8px;
+    cursor: pointer;
+}
+
+.label-name-btn.save {
+    border-color: rgba(56, 189, 248, 0.85);
+    color: #bae6fd;
 }
