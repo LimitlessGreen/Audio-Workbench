@@ -27,6 +27,8 @@ def render_daw_player(audio_bytes: bytes, **options) -> str:
     options : dict
         Passed to BirdNETPlayer constructor.
     """
+    iframe_height = int(options.pop("iframe_height", 620) or 620)
+    iframe_height = max(180, min(1600, iframe_height))
     b64 = base64.b64encode(audio_bytes).decode("ascii")
     opts = json.dumps(options or {})
 
@@ -38,7 +40,10 @@ def render_daw_player(audio_bytes: bytes, **options) -> str:
   <meta name='viewport' content='width=device-width, initial-scale=1' />
   <script src='https://unpkg.com/wavesurfer@7'></script>
   <style>{_PLAYER_CSS}</style>
-  <style>body{{margin:0;padding:0}}#player{{width:100%;}}</style>
+  <style>
+    html, body {{ margin:0; padding:0; width:100%; height:100%; overflow:hidden; }}
+    #player {{ width:100%; height:100%; }}
+  </style>
 </head>
 <body>
   <div id='player'></div>
@@ -65,6 +70,6 @@ def render_daw_player(audio_bytes: bytes, **options) -> str:
 
     escaped = html.escape(srcdoc, quote=True)
     return (
-        "<iframe style='width:100%;height:620px;border:0' "
+        f"<iframe style='width:100%;height:{iframe_height}px;border:0' "
         f"srcdoc=\"{escaped}\"></iframe>"
     )

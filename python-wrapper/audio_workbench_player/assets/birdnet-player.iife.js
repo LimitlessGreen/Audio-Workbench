@@ -4973,12 +4973,13 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       if (this._isSyncingLabels || !label) return;
       const id = label.id || `lbl_${Math.random().toString(36).slice(2, 10)}`;
       const existing = this._linkedLabels.get(id);
+      const nextName = String(label?.label || label?.species || existing?.label || existing?.species || "Label").trim();
       const next = this._normalizeLinkedLabel({
         ...existing,
         ...label,
         id,
-        species: existing?.species ?? label?.label ?? "",
-        label: label?.label ?? existing?.label ?? "Label"
+        species: nextName,
+        label: nextName
       });
       this._linkedLabels.set(id, next);
       this._state?.updateActiveSegmentFromLabel?.(next);
@@ -5005,12 +5006,13 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       if (this._isSyncingLabels || !label) return;
       const id = label.id || `lbl_${Math.random().toString(36).slice(2, 10)}`;
       const existing = this._linkedLabels.get(id);
+      const nextName = String(label?.label || label?.species || existing?.label || existing?.species || "Label").trim();
       const next = this._normalizeLinkedLabel({
         ...existing,
         ...label,
         id,
-        species: existing?.species ?? label?.label ?? "",
-        label: label?.label ?? existing?.label ?? "Label"
+        species: nextName,
+        label: nextName
       });
       this._linkedLabels.set(id, next);
       this._state?.updateActiveSegmentFromLabel?.(next);
