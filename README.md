@@ -235,7 +235,7 @@ python -m http.server 8080
 ```
 
 Dann öffnen:
-- `http://localhost:8080/demo/storybook.html` (10 interaktive Stories)
+- `http://localhost:8080/demo/storybook.html` (kuratierte Interactive Stories)
 - `http://localhost:8080/demo/index.html` (Standard-Demo)
 
 ## Publish
