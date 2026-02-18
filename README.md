@@ -103,8 +103,8 @@ onBeforeUnmount(() => player?.destroy())
 ### 7) CDN / IIFE (Vanilla)
 ```html
 <script src="https://unpkg.com/wavesurfer@7"></script>
-<script src="https://unpkg.com/audio-workbench-player@1/iife"></script>
-<link rel="stylesheet" href="https://unpkg.com/audio-workbench-player@1/style" />
+<script src="https://unpkg.com/audio-workbench-player@0.0.1/iife"></script>
+<link rel="stylesheet" href="https://unpkg.com/audio-workbench-player@0.0.1/style" />
 <div id="player"></div>
 <script>
   const player = new BirdNETPlayerModule.BirdNETPlayer(document.getElementById('player'))

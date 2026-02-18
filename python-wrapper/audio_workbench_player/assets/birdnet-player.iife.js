@@ -2753,7 +2753,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
         if (this.followMode === "smooth") {
           this._applySmoothFollow(position, vw);
         } else {
-          const scrollLeft = this.d.canvasWrapper.scrollLeft;
+          const scrollLeft = this._getPrimaryScrollLeft();
           const guardLeft = scrollLeft + vw * this._playbackViewportConfig.followGuardLeftRatio;
           const guardRight = scrollLeft + vw * this._playbackViewportConfig.followGuardRightRatio;
           if (position < guardLeft || position > guardRight) {
@@ -3151,8 +3151,23 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
     // ═════════════════════════════════════════════════════════════════
     //  Viewport & Scroll
     // ═════════════════════════════════════════════════════════════════
+    _getPrimaryScrollWrapper() {
+      if (!this._showSpectrogram && this._showWaveform) return this.d.waveformWrapper;
+      return this.d.canvasWrapper || this.d.waveformWrapper;
+    }
+    _getSecondaryScrollWrapper() {
+      const primary = this._getPrimaryScrollWrapper();
+      if (primary === this.d.canvasWrapper) return this.d.waveformWrapper;
+      if (primary === this.d.waveformWrapper) return this.d.canvasWrapper;
+      return null;
+    }
+    _getPrimaryScrollLeft() {
+      return this._getPrimaryScrollWrapper()?.scrollLeft || 0;
+    }
     _getViewportWidth() {
-      return Math.max(1, this.d.canvasWrapper.clientWidth || this.d.waveformWrapper.clientWidth);
+      const primary = this._getPrimaryScrollWrapper();
+      const secondary = this._getSecondaryScrollWrapper();
+      return Math.max(1, primary?.clientWidth || secondary?.clientWidth || 0);
     }
     _setLinkedScrollLeft(nextLeft) {
       if (this.scrollSyncLock) return;
@@ -3161,8 +3176,10 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       const tw = this.audioBuffer ? Math.max(1, Math.floor(this.audioBuffer.duration * this.pixelsPerSecond)) : 0;
       const maxScroll = Math.max(0, tw - vw);
       const bounded = Math.max(0, Math.min(nextLeft, maxScroll));
-      this.d.canvasWrapper.scrollLeft = bounded;
-      this.d.waveformWrapper.scrollLeft = this.d.canvasWrapper.scrollLeft;
+      const primary = this._getPrimaryScrollWrapper();
+      const secondary = this._getSecondaryScrollWrapper();
+      if (primary) primary.scrollLeft = bounded;
+      if (secondary) secondary.scrollLeft = primary?.scrollLeft ?? bounded;
       this.scrollSyncLock = false;
       this._scheduleUiUpdate({ time: this._getCurrentTime(), fromPlayback: false });
     }
@@ -3174,7 +3191,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       const duration = this.audioBuffer?.duration || 0;
       const clamped = Math.max(minPps, Math.min(maxPps, nextPps));
       const changed = Math.abs(clamped - this.pixelsPerSecond) >= 0.01;
-      const fallbackTime = (this.d.canvasWrapper.scrollLeft + vw / 2) / Math.max(this.pixelsPerSecond, 0.01);
+      const fallbackTime = (this._getPrimaryScrollLeft() + vw / 2) / Math.max(this.pixelsPerSecond, 0.01);
       const aTime = anchorTime ?? fallbackTime;
       const aPixel = anchorPixel ?? vw / 2;
       const effectivePps = changed ? clamped : this.pixelsPerSecond;
@@ -3238,7 +3255,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       if (trackWidth <= 0) return;
       const vw = this._getViewportWidth();
       const viewTime = vw / this.pixelsPerSecond;
-      const startTime = this.d.canvasWrapper.scrollLeft / this.pixelsPerSecond;
+      const startTime = this._getPrimaryScrollLeft() / this.pixelsPerSecond;
       const endTime = Math.min(this.audioBuffer.duration, startTime + viewTime);
       const nextStartNorm = startTime / this.audioBuffer.duration;
       const nextEndNorm = endTime / this.audioBuffer.duration;
@@ -3481,7 +3498,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       const redrawSpectrogram = force || this._viewResizeNeedsSpectrogramRedraw;
       this._viewResizeNeedsWaveformRedraw = false;
       this._viewResizeNeedsSpectrogramRedraw = false;
-      const savedScroll = this.d.canvasWrapper.scrollLeft;
+      const savedScroll = this._getPrimaryScrollLeft();
       if (redrawWaveform) this._drawMainWaveform();
       if (redrawSpectrogram) this._drawSpectrogram();
       this._setLinkedScrollLeft(savedScroll);
@@ -3545,7 +3562,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       const tw = Math.max(1, Math.floor(this.audioBuffer.duration * this.pixelsPerSecond));
       const maxScroll = Math.max(0, tw - vw);
       const target = Math.max(0, Math.min(maxScroll, targetScrollLeft));
-      const start = this.d.canvasWrapper.scrollLeft;
+      const start = this._getPrimaryScrollLeft();
       const delta = target - start;
       if (Math.abs(delta) < 1) return;
       const now = performance.now();
@@ -3578,7 +3595,7 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       const totalWidth = this.audioBuffer ? Math.max(1, Math.floor(this.audioBuffer.duration * this.pixelsPerSecond)) : 0;
       const maxScroll = Math.max(0, totalWidth - vw);
       const target = Math.max(0, Math.min(maxScroll, position - vw * this._playbackViewportConfig.followTargetRatio));
-      const current = this.d.canvasWrapper.scrollLeft;
+      const current = this._getPrimaryScrollLeft();
       const delta = target - current;
       if (Math.abs(delta) < 0.6) return;
       const inSeekFocus = performance.now() < this._smoothSeekFocusUntil;
@@ -3699,7 +3716,14 @@ function applyMelFilterbank(powerSpectrum, melFilterbank) {
       on(this.d.canvasWrapper, "click", (e) => this._handleCanvasClick(e));
       on(this.d.waveformWrapper, "click", (e) => this._handleWaveformClick(e));
       on(this.d.canvasWrapper, "scroll", () => {
-        if (!this.scrollSyncLock) this._setLinkedScrollLeft(this.d.canvasWrapper.scrollLeft);
+        if (this.scrollSyncLock) return;
+        if (this._getPrimaryScrollWrapper() !== this.d.canvasWrapper) return;
+        this._setLinkedScrollLeft(this.d.canvasWrapper.scrollLeft);
+      });
+      on(this.d.waveformWrapper, "scroll", () => {
+        if (this.scrollSyncLock) return;
+        if (this._getPrimaryScrollWrapper() !== this.d.waveformWrapper) return;
+        this._setLinkedScrollLeft(this.d.waveformWrapper.scrollLeft);
       });
       on(this.d.canvasWrapper, "wheel", (e) => this._handleWheel(e, "spectrogram"), { passive: false });
       on(this.d.waveformWrapper, "wheel", (e) => this._handleWheel(e, "waveform"), { passive: false });

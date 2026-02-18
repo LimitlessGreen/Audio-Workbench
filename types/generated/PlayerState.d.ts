@@ -315,6 +315,9 @@ export class PlayerState {
     _drawOverviewWaveform(): void;
     _createFrequencyLabels(): void;
     _updateAmplitudeLabels(): void;
+    _getPrimaryScrollWrapper(): any;
+    _getSecondaryScrollWrapper(): any;
+    _getPrimaryScrollLeft(): any;
     _getViewportWidth(): number;
     _setLinkedScrollLeft(nextLeft: any): void;
     _setPixelsPerSecond(nextPps: any, redraw: any, anchorTime: any, anchorPixel: any): void;
