@@ -249,4 +249,4 @@ python -m twine upload dist/*
 
 ## License
 
-CC BY-NC 4.0 (Non-Commercial)
+GNU AGPL-3.0

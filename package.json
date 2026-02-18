@@ -32,7 +32,7 @@
     "audio-workbench"
   ],
   "author": "Dein Name",
-  "license": "CC-BY-NC-4.0",
+  "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "https://github.com/user/audio-workbench-player"

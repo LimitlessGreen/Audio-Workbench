@@ -45,4 +45,4 @@ python demo_gradio.py
 
 ## License
 
-CC BY-NC 4.0 (Non-Commercial)
+GNU AGPL-3.0
