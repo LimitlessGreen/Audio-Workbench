@@ -1,0 +1,44 @@
+{
+  "name": "audio-workbench-player",
+  "version": "1.0.0",
+  "description": "DAW-like audio player with waveform + spectrogram for analysis",
+  "type": "module",
+  "main": "./dist/birdnet-player.esm.js",
+  "module": "./dist/birdnet-player.esm.js",
+  "unpkg": "./dist/birdnet-player.iife.js",
+  "types": "./types/index.d.ts",
+  "files": [
+    "dist/",
+    "types/",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/birdnet-player.esm.js",
+      "types": "./types/index.d.ts"
+    },
+    "./iife": "./dist/birdnet-player.iife.js",
+    "./style": "./dist/birdnet-player.css"
+  },
+  "peerDependencies": {
+    "wavesurfer": "^7"
+  },
+  "keywords": [
+    "audio",
+    "spectrogram",
+    "daw",
+    "waveform",
+    "audio-workbench"
+  ],
+  "author": "Dein Name",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/user/audio-workbench-player"
+  },
+  "scripts": {
+    "build": "bash ./scripts/build.sh",
+    "pack:check": "npm pack"
+  }
+}

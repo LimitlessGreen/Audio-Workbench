@@ -1,0 +1,175 @@
+# audio-workbench-player
+
+DAW-ähnlicher Audio-Player (Waveform + Spektrogramm + Transport Controls) als eigenständige Library.
+
+## Install
+
+```bash
+npm i audio-workbench-player wavesurfer
+```
+
+## Paketinhalt
+
+- `dist/birdnet-player.esm.js` (ESM)
+- `dist/birdnet-player.iife.js` (CDN/IIFE)
+- `dist/birdnet-player.css` (Styles)
+- `types/index.d.ts` (TypeScript)
+
+## Quickstart
+
+```js
+import { BirdNETPlayer } from 'audio-workbench-player'
+import 'audio-workbench-player/style'
+
+const player = new BirdNETPlayer(document.getElementById('player'))
+await player.ready
+```
+
+## 10 Usage Examples
+
+### 1) ESM (Vite/Vanilla)
+```js
+import { BirdNETPlayer } from 'audio-workbench-player'
+import 'audio-workbench-player/style'
+
+const player = new BirdNETPlayer(document.getElementById('player'))
+await player.ready
+```
+
+### 2) ESM + URL laden
+```js
+await player.loadUrl('/audio/birdsong.mp3')
+player.play()
+```
+
+### 3) ESM + File Input
+```js
+const input = document.querySelector('#audio')
+input.addEventListener('change', async () => {
+  const file = input.files?.[0]
+  if (!file) return
+  await player.loadFile(file)
+})
+```
+
+### 4) React
+```jsx
+import { useEffect, useRef } from 'react'
+import { BirdNETPlayer } from 'audio-workbench-player'
+import 'audio-workbench-player/style'
+
+export default function Player() {
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!ref.current) return
+    const p = new BirdNETPlayer(ref.current)
+    return () => p.destroy()
+  }, [])
+  return <div ref={ref} />
+}
+```
+
+### 5) Vue
+```js
+import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { BirdNETPlayer } from 'audio-workbench-player'
+import 'audio-workbench-player/style'
+
+const root = ref(null)
+let player
+
+onMounted(() => { player = new BirdNETPlayer(root.value) })
+onBeforeUnmount(() => player?.destroy())
+```
+
+### 6) Svelte
+```svelte
+<script>
+  import { onMount } from 'svelte'
+  import { BirdNETPlayer } from 'audio-workbench-player'
+  import 'audio-workbench-player/style'
+
+  let el
+  let player
+  onMount(() => {
+    player = new BirdNETPlayer(el)
+    return () => player.destroy()
+  })
+</script>
+
+<div bind:this={el}></div>
+```
+
+### 7) CDN / IIFE (Vanilla)
+```html
+<script src="https://unpkg.com/wavesurfer@7"></script>
+<script src="https://unpkg.com/audio-workbench-player@1/iife"></script>
+<link rel="stylesheet" href="https://unpkg.com/audio-workbench-player@1/style" />
+<div id="player"></div>
+<script>
+  const player = new BirdNETPlayerModule.BirdNETPlayer(document.getElementById('player'))
+</script>
+```
+
+### 8) Streamlit (Python)
+```python
+from audio_workbench_player import render_daw_player
+import streamlit as st
+import streamlit.components.v1 as components
+
+components.html(render_daw_player(audio_bytes), height=620, scrolling=False)
+```
+
+### 9) Jupyter Notebook
+```python
+from IPython.display import HTML
+from audio_workbench_player import render_daw_player
+
+HTML(render_daw_player(audio_bytes))
+```
+
+### 10) Electron / Tauri WebView
+```js
+import { BirdNETPlayer } from 'audio-workbench-player'
+import 'audio-workbench-player/style'
+
+const p = new BirdNETPlayer(document.getElementById('player'))
+await p.loadUrl('file:///absolute/path/to/audio.wav')
+```
+
+## API
+
+```ts
+new BirdNETPlayer(container: HTMLElement, options?)
+player.ready: Promise<BirdNETPlayer>
+player.loadUrl(url: string): Promise<void>
+player.loadFile(file: File): Promise<void>
+player.currentTime: number
+player.duration: number
+player.play(): void
+player.pause(): void
+player.stop(): void
+player.togglePlayPause(): void
+player.destroy(): void
+```
+
+## Build / Sync from parent project
+
+```bash
+cd audio-workbench-player-lib
+bash scripts/build.sh
+npm pack
+```
+
+## Publish
+
+```bash
+npm publish --access public
+cd python-wrapper
+python -m build
+python -m twine upload dist/*
+```
+
+## License
+
+MIT
