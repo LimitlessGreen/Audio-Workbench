@@ -6,14 +6,6 @@ BEGIN
     CREATE TYPE project_role AS ENUM ('owner', 'manager', 'annotator', 'reviewer', 'viewer');
   END IF;
 
-  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'import_job_status') THEN
-    CREATE TYPE import_job_status AS ENUM ('queued', 'running', 'partial', 'failed', 'done');
-  END IF;
-
-  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'task_status') THEN
-    CREATE TYPE task_status AS ENUM ('open', 'in_progress', 'review', 'done', 'blocked');
-  END IF;
-
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'job_type') THEN
     CREATE TYPE job_type AS ENUM ('import', 'analysis', 'embedding', 'clustering');
   END IF;
@@ -47,14 +39,6 @@ CREATE TABLE IF NOT EXISTS teams (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS team_memberships (
-  team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  is_admin BOOLEAN NOT NULL DEFAULT false,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (team_id, user_id)
-);
-
 CREATE TABLE IF NOT EXISTS memberships (
   team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -74,28 +58,6 @@ CREATE TABLE IF NOT EXISTS projects (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS project_members (
-  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role project_role NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (project_id, user_id)
-);
-
-CREATE TABLE IF NOT EXISTS recordings (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  source_type TEXT NOT NULL CHECK (source_type IN ('local', 'xeno-canto', 'url')),
-  source_ref TEXT NOT NULL,
-  title TEXT NOT NULL DEFAULT '',
-  duration_seconds DOUBLE PRECISION,
-  sample_rate INTEGER,
-  storage_key TEXT,
-  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 CREATE TABLE IF NOT EXISTS assets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -111,34 +73,6 @@ CREATE TABLE IF NOT EXISTS assets (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS import_jobs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  source TEXT NOT NULL CHECK (source IN ('local', 'xeno-canto')),
-  status import_job_status NOT NULL DEFAULT 'queued',
-  total_items INTEGER NOT NULL DEFAULT 0,
-  processed_items INTEGER NOT NULL DEFAULT 0,
-  failed_items INTEGER NOT NULL DEFAULT 0,
-  error_log TEXT NOT NULL DEFAULT '',
-  created_by UUID NOT NULL REFERENCES users(id),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS tasks (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  recording_id UUID REFERENCES recordings(id) ON DELETE SET NULL,
-  assignee_id UUID REFERENCES users(id) ON DELETE SET NULL,
-  status task_status NOT NULL DEFAULT 'open',
-  priority INTEGER NOT NULL DEFAULT 3,
-  title TEXT NOT NULL,
-  description TEXT NOT NULL DEFAULT '',
-  created_by UUID NOT NULL REFERENCES users(id),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 CREATE TABLE IF NOT EXISTS jobs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -146,7 +80,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   type job_type NOT NULL,
   backend job_backend NOT NULL,
   status job_status NOT NULL DEFAULT 'queued',
-  priority INTEGER NOT NULL DEFAULT 5,
+  priority SMALLINT NOT NULL DEFAULT 5,
   progress DOUBLE PRECISION NOT NULL DEFAULT 0,
   payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   error_code TEXT,
@@ -170,15 +104,10 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_projects_team_id ON projects(team_id);
-CREATE INDEX IF NOT EXISTS idx_recordings_project_id ON recordings(project_id);
 CREATE INDEX IF NOT EXISTS idx_assets_project_id ON assets(project_id);
 CREATE INDEX IF NOT EXISTS idx_assets_type ON assets(type);
 CREATE INDEX IF NOT EXISTS idx_jobs_project_id ON jobs(project_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs(type);
-CREATE INDEX IF NOT EXISTS idx_import_jobs_project_id ON import_jobs(project_id);
-CREATE INDEX IF NOT EXISTS idx_import_jobs_status ON import_jobs(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_assignee_id ON tasks(assignee_id);
 CREATE INDEX IF NOT EXISTS idx_audit_events_project_id ON audit_events(project_id);
 CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at);
